@@ -93,8 +93,10 @@ from the eventual vector index.
 ```text
 .
 ├── cmd/               # TCP server, small demos, and inspection tools
+├── main.go             # Public TCP server entry point and signal handling
 ├── db/                # Public database API and orchestration
 ├── protocol/          # RESP parsing and response encoding
+├── transport/         # Reusable TCP listener lifecycle
 ├── storage/
 │   ├── memtable/      # Mutable in-memory state
 │   ├── wal/           # Log encoding and replay

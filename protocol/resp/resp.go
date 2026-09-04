@@ -23,52 +23,56 @@ func (e *ProtocolError) Error() string {
 	return e.message
 }
 
-// ReadCommand reads one RESP array containing bulk-string command arguments.
-// Other RESP types are intentionally unsupported for now.
-//
-// ex. For input SET abc 123 2x -> output ["SET", "abc", "123", "2x"].
-func ReadCommand(reader *bufio.Reader) ([][]byte, error) {
+// Request is a well-framed RESP array of bulk-string arguments. Command
+// validation belongs to the command package, not the wire-format parser.
+type Request struct {
+	Arguments [][]byte
+}
+
+// ReadRequest reads one RESP array containing bulk-string arguments. Other
+// RESP types are intentionally unsupported for now.
+func ReadRequest(reader *bufio.Reader) (Request, error) {
 	prefix, err := reader.ReadByte()
 	if err != nil {
-		return nil, err
+		return Request{}, err
 	}
 	if prefix != '*' {
-		return nil, protocolError("expected array")
+		return Request{}, protocolError("expected array")
 	}
 
 	argumentCount, err := readLength(reader, "array length", maxArguments)
 	if err != nil {
-		return nil, err
+		return Request{}, err
 	}
 	if argumentCount == 0 {
-		return nil, protocolError("command array is empty")
+		return Request{}, protocolError("command array is empty")
 	}
 
 	arguments := make([][]byte, argumentCount)
 	for i := range arguments {
 		prefix, err := reader.ReadByte()
 		if err != nil {
-			return nil, err
+			return Request{}, err
 		}
 		if prefix != '$' {
-			return nil, protocolError("expected bulk string")
+			return Request{}, protocolError("expected bulk string")
 		}
 
 		length, err := readLength(reader, "bulk string length", maxBulkBytes)
 		if err != nil {
-			return nil, err
+			return Request{}, err
 		}
 		argument := make([]byte, length)
 		if _, err := io.ReadFull(reader, argument); err != nil {
-			return nil, err
+			return Request{}, err
 		}
 		if err := expectCRLF(reader); err != nil {
-			return nil, err
+			return Request{}, err
 		}
 		arguments[i] = argument
 	}
 
-	return arguments, nil
+	return Request{Arguments: arguments}, nil
 }
 
 // WriteSimpleString writes a RESP simple string. Callers must pass a value
@@ -82,6 +86,29 @@ func WriteSimpleString(writer *bufio.Writer, value string) error {
 // characters.
 func WriteError(writer *bufio.Writer, value string) error {
 	_, err := writer.WriteString("-" + value + "\r\n")
+	return err
+}
+
+// WriteBulkString writes a RESP bulk string. A nil value is encoded as a null
+// bulk string, while an empty value is encoded as a zero-length bulk string.
+func WriteBulkString(writer *bufio.Writer, value []byte) error {
+	if value == nil {
+		_, err := writer.WriteString("$-1\r\n")
+		return err
+	}
+	if _, err := writer.WriteString("$" + strconv.Itoa(len(value)) + "\r\n"); err != nil {
+		return err
+	}
+	if _, err := writer.Write(value); err != nil {
+		return err
+	}
+	_, err := writer.WriteString("\r\n")
+	return err
+}
+
+// WriteInteger writes a RESP integer.
+func WriteInteger(writer *bufio.Writer, value int64) error {
+	_, err := writer.WriteString(":" + strconv.FormatInt(value, 10) + "\r\n")
 	return err
 }
 

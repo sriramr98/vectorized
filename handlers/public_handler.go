@@ -7,17 +7,29 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"strings"
 
+	"github.com/sriramr98/vectorized/db"
+	"github.com/sriramr98/vectorized/protocol/command"
 	"github.com/sriramr98/vectorized/protocol/resp"
 )
 
-func PublicTcpHandler(ctx context.Context, conn net.Conn) error {
+// PublicTCPHandler serves the RESP protocol over a public client connection.
+type PublicTCPHandler struct {
+	store db.Store
+}
+
+// NewPublicTCPHandler creates a public protocol handler backed by store.
+func NewPublicTCPHandler(store db.Store) *PublicTCPHandler {
+	return &PublicTCPHandler{store: store}
+}
+
+// ServeConn implements tcpserver.Handler.
+func (h *PublicTCPHandler) ServeConn(ctx context.Context, conn net.Conn) error {
 	reader := bufio.NewReader(conn)
 	writer := bufio.NewWriter(conn)
 
 	for {
-		arguments, err := resp.ReadCommand(reader)
+		request, err := resp.ReadRequest(reader)
 		if err != nil {
 			if errors.Is(err, io.EOF) || ctx.Err() != nil {
 				return nil
@@ -31,7 +43,18 @@ func PublicTcpHandler(ctx context.Context, conn net.Conn) error {
 			return fmt.Errorf("read command: %w", err)
 		}
 
-		if err := handleCommand(writer, arguments); err != nil {
+		parsedCommand, err := command.Decode(request)
+		if err != nil {
+			if writeErr := resp.WriteError(writer, "ERR "+err.Error()); writeErr != nil {
+				return writeErr
+			}
+			if flushErr := writer.Flush(); flushErr != nil {
+				return flushErr
+			}
+			continue
+		}
+
+		if err := h.handleCommand(writer, parsedCommand); err != nil {
 			return err
 		}
 		if err := writer.Flush(); err != nil {
@@ -40,10 +63,36 @@ func PublicTcpHandler(ctx context.Context, conn net.Conn) error {
 	}
 }
 
-func handleCommand(writer *bufio.Writer, arguments [][]byte) error {
-	if len(arguments) == 1 && strings.EqualFold(string(arguments[0]), "PING") {
+func (h *PublicTCPHandler) handleCommand(writer *bufio.Writer, parsed command.Command) error {
+	switch operation := parsed.(type) {
+	case command.Ping:
 		return resp.WriteSimpleString(writer, "PONG")
+	case command.Set:
+		if err := h.store.Set(operation.Key, operation.Value); err != nil {
+			return resp.WriteError(writer, "ERR internal server error")
+		}
+		return resp.WriteSimpleString(writer, "OK")
+	case command.Get:
+		value, found, err := h.store.Get(operation.Key)
+		if err != nil {
+			return resp.WriteError(writer, "ERR internal server error")
+		}
+		if !found {
+			return resp.WriteBulkString(writer, nil)
+		}
+		return resp.WriteBulkString(writer, value)
+	case command.Delete:
+		deleted, err := h.store.Delete(operation.Key)
+		if err != nil {
+			return resp.WriteError(writer, "ERR internal server error")
+		}
+		if deleted {
+			return resp.WriteInteger(writer, 1)
+		}
+		return resp.WriteInteger(writer, 0)
+	case command.Unknown:
+		return resp.WriteError(writer, "ERR unknown or unsupported command")
+	default:
+		return resp.WriteError(writer, "ERR internal server error")
 	}
-
-	return resp.WriteError(writer, "ERR unknown or unsupported command")
 }

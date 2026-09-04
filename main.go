@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/sriramr98/vectorized/db"
 	"github.com/sriramr98/vectorized/handlers"
 	"github.com/sriramr98/vectorized/transport/tcpserver"
 )
@@ -28,7 +29,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	server := tcpserver.New(listener, tcpserver.HandlerFunc(handlers.PublicTcpHandler), logger)
+	store := db.NewMemoryStore()
+	server := tcpserver.New(listener, handlers.NewPublicTCPHandler(store), logger)
 
 	logger.Info("server listening", "address", listener.Addr())
 	if err := server.Serve(ctx); err != nil && !errors.Is(err, context.Canceled) {

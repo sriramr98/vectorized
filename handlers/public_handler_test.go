@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sriramr98/vectorized/db"
 	"github.com/sriramr98/vectorized/handlers"
 )
 
@@ -16,7 +17,7 @@ func TestPublicTCPHandlerRespondsToPingAndUnknownCommands(t *testing.T) {
 
 	handlerDone := make(chan error, 1)
 	go func() {
-		handlerDone <- handlers.PublicTcpHandler(context.Background(), serverConn)
+		handlerDone <- handlers.NewPublicTCPHandler(db.NewMemoryStore()).ServeConn(context.Background(), serverConn)
 		_ = serverConn.Close()
 	}()
 
@@ -42,7 +43,7 @@ func TestPublicTCPHandlerReportsMalformedRequests(t *testing.T) {
 
 	handlerDone := make(chan error, 1)
 	go func() {
-		handlerDone <- handlers.PublicTcpHandler(context.Background(), serverConn)
+		handlerDone <- handlers.NewPublicTCPHandler(db.NewMemoryStore()).ServeConn(context.Background(), serverConn)
 		_ = serverConn.Close()
 	}()
 
@@ -61,6 +62,35 @@ func TestPublicTCPHandlerReportsMalformedRequests(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("handler did not stop after malformed request")
+	}
+}
+
+func TestPublicTCPHandlerStoresValues(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer clientConn.Close()
+
+	handlerDone := make(chan error, 1)
+	go func() {
+		handlerDone <- handlers.NewPublicTCPHandler(db.NewMemoryStore()).ServeConn(context.Background(), serverConn)
+		_ = serverConn.Close()
+	}()
+
+	assertRequestResponse(t, clientConn, "*3\r\n$3\r\nSET\r\n$3\r\nkey\r\n$5\r\nvalue\r\n", "+OK\r\n")
+	assertRequestResponse(t, clientConn, "*2\r\n$3\r\nSET\r\n$3\r\nkey\r\n", "-ERR wrong number of arguments for 'SET' command\r\n")
+	assertRequestResponse(t, clientConn, "*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n", "$5\r\nvalue\r\n")
+	assertRequestResponse(t, clientConn, "*2\r\n$3\r\nDEL\r\n$3\r\nkey\r\n", ":1\r\n")
+	assertRequestResponse(t, clientConn, "*2\r\n$3\r\nGET\r\n$3\r\nkey\r\n", "$-1\r\n")
+
+	if err := clientConn.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-handlerDone:
+		if err != nil {
+			t.Fatalf("PublicTCPHandler() error = %v, want nil", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("handler did not stop after client disconnect")
 	}
 }
 
