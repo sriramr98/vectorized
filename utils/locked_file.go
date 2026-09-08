@@ -3,17 +3,16 @@ package utils
 import (
 	"os"
 	"sync"
-	"sync/atomic"
 
 	"golang.org/x/sys/unix"
 )
 
-// LockedFile represents a file in the fs that's been locked for use
+// LockedFile represents a file in the fs that's been locked for use. DO NOT CALL `Close` directly on the File. Always Close LockedFile
 type LockedFile struct {
 	*os.File
 
-	locked atomic.Bool
-	mu     *sync.Mutex
+	locked bool
+	mu     sync.Mutex
 }
 
 func NewLockedFile(fpath string) (*LockedFile, error) {
@@ -24,8 +23,8 @@ func NewLockedFile(fpath string) (*LockedFile, error) {
 
 	return &LockedFile{
 		File:   file,
-		locked: atomic.Bool{},
-		mu:     &sync.Mutex{},
+		locked: false,
+		mu:     sync.Mutex{},
 	}, nil
 
 }
@@ -38,14 +37,14 @@ func (l *LockedFile) TryLock() error {
 		return ErrResourceClosed
 	}
 
-	if l.locked.Load() {
+	if l.locked {
 		return ErrResourceAlreadyLocked
 	}
 
 	if err := unix.Flock(int(l.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
 		return err
 	}
-	l.locked.Store(true)
+	l.locked = true
 
 	return nil
 }
@@ -56,14 +55,14 @@ func (l *LockedFile) Close() error {
 	defer l.mu.Unlock()
 
 	// If file is locked, remove lock
-	if l.locked.Load() {
+	if l.locked {
 		if err := unix.Flock(int(l.Fd()), unix.LOCK_UN); err != nil {
 			//TODO: What do we do here? Should we close the file in this scenario????
 			return err
 		}
 	}
 
-	l.locked.Store(false)
+	l.locked = false
 
 	// always close file even if lock was never acquired
 	var err error

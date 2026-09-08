@@ -16,17 +16,19 @@ Each segment contains a sequence of entries encoded as follows:
 
 ![WAL structure](./assets/wal_structure.png)
 
-1. **CRC** — 4 bytes. A checksum of the LSN, operation type, length, and data.
-2. **LSN** — 8 bytes. A monotonically increasing log sequence number.
-3. **Operation type** — 1 byte. Identifies the operation, such as `SET` or
+1. **CRC** — 4 bytes. A checksum of the version, LSN, operation type, length,
+   and data.
+2. **Version** — 1 byte. Identifies the encoding version of the WAL entry.
+3. **LSN** — 8 bytes. A monotonically increasing log sequence number.
+4. **Operation type** — 1 byte. Identifies the operation, such as `SET` or
    `DELETE`.
-4. **Data length** — 8 bytes. The size of the data field.
-5. **Data** — Variable length. The operation's arguments.
+5. **Data length** — 4 bytes. The size of the data field.
+6. **Data** — Variable length. The operation's arguments.
 
-The fixed entry overhead is 21 bytes, so the total entry size is:
+The fixed entry overhead is 18 bytes, so the total entry size is:
 
 ```text
-21 + data length
+18 + data length
 ```
 
 ## WAL Startup
@@ -52,3 +54,17 @@ Closing the WAL synchronizes and closes the active segment, closes any other ope
 Recovery replays valid WAL entries in segment and entry order. The CRC allows recovery to detect incomplete or corrupted entries after a crash.
 
 When the active segment reaches its configured size limit, the WAL creates a new segment with the next ID and continues appending there.
+
+
+## Interesting Decisions
+
+1. Why is CRC calculated at the end but written to the start of the record?
+
+We need to first convert all the data we want into bytes before we calculate its checksum. That's why we calculate it at the end.
+
+When we replay a WAL record, we need to know if an entry is valid before we parse or skip it. Hence, it is easy to read the first 4 bytes, look at the checksum, parse the remaining bytes, and compare the checksum.
+
+
+2. Why do we append data length to the record instead of using a de-limiter to identify separate records?
+
+What if the de-limiter was part of the data we're encoding? Since the data comes from various places, we cannot reliably find a delimiter that won't come up inside the data. Hence it's simple to just track the length of bytes and read till then to decode the original WalEntry.

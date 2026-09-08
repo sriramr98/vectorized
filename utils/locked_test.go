@@ -17,7 +17,7 @@ func TestLockedFileCreatesAndLocksFile(t *testing.T) {
 	if err := lockedFile.TryLock(); err != nil {
 		t.Fatalf("TryLock() error = %v", err)
 	}
-	if !lockedFile.locked.Load() {
+	if !lockedFile.locked {
 		t.Fatal("locked = false after successful TryLock(), want true")
 	}
 	if err := lockedFile.TryLock(); !errors.Is(err, ErrResourceAlreadyLocked) {
@@ -56,7 +56,7 @@ func TestLockedFileContentionAndReacquisition(t *testing.T) {
 	if err := contender.TryLock(); err == nil {
 		t.Fatal("contending TryLock() error = nil, want lock contention")
 	}
-	if contender.locked.Load() {
+	if contender.locked {
 		t.Fatal("contender marked locked after failed TryLock()")
 	}
 
@@ -103,7 +103,7 @@ func TestLockedDirLifecycle(t *testing.T) {
 	if err := lockDir.Release(); err != nil {
 		t.Fatalf("Release() error = %v", err)
 	}
-	if lockDir.locked.Load() || lockDir.lockFile != nil {
+	if lockDir.locked || lockDir.lockFile != nil {
 		t.Fatal("directory lock state was not cleared after Release()")
 	}
 	if err := lockDir.Release(); !errors.Is(err, ErrResourceNotLocked) {
@@ -128,7 +128,7 @@ func TestLockedDirContentionAndReacquisition(t *testing.T) {
 	if err := contender.TryLock(); err == nil {
 		t.Fatal("contending TryLock() error = nil, want lock contention")
 	}
-	if contender.lockFile != nil || contender.locked.Load() {
+	if contender.lockFile != nil || contender.locked {
 		t.Fatal("contender retained lock state after failed TryLock()")
 	}
 

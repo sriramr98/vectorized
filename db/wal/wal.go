@@ -1,6 +1,7 @@
-package db
+package wal
 
 import (
+	"bytes"
 	"cmp"
 	"errors"
 	"fmt"
@@ -10,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/sriramr98/vectorized/utils"
 	"golang.org/x/sys/unix"
@@ -17,9 +19,16 @@ import (
 
 const FILE_PREFIX = "wal_segment"
 
-var ErrUnknownFileName = errors.New("unknown file name")
+var (
+	ErrUnknownFileName = errors.New("unknown file name")
+	ErrAlreadyClosed   = errors.New("wal already closed")
+)
 
 type WalOptions struct {
+	maxFileSizeMB uint64        // max size of open segment file before it's rotated
+	maxFileCount  uint          // max no of wal files to be kept in the wal folder. Older ones can be deleted at any time
+	alwaysSync    bool          // always fsync when a wal entry is written. Expensive but highly durable. Either alwaysSync takes higher priority on syncDuration
+	syncInterval  time.Duration // time internal between two fsync calls of the same segment. Discarded if alwaysSync is set to true
 }
 
 type WalFileName string
@@ -89,9 +98,7 @@ type Wal struct {
 	segments    []*Segment
 	openSegment *Segment
 	dirLocker   *utils.LockedDir
-}
-
-type WalEntry struct {
+	closed      bool
 }
 
 func NewWal(dirpath string, opts WalOptions) (*Wal, error) {
@@ -158,6 +165,36 @@ func NewWal(dirpath string, opts WalOptions) (*Wal, error) {
 	}, nil
 }
 
+func (w *Wal) Write(data []byte, opType OpType) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.closed {
+		return ErrAlreadyClosed
+	}
+
+	entry := WalEntryV1{
+		LSN:    1, //TODO: Make dynamic
+		OpType: opType,
+		Data:   data,
+	}
+
+	w.rotateSegmentIfRequired(entry)
+
+	buf := bytes.NewBuffer([]byte{})
+	if err := entry.Encode(buf); err != nil {
+		return err
+	}
+
+	// Segment is opened with O_APPEND, so writes always append and seek to end automatically
+	_, err := w.openSegment.file.Write(buf.Bytes())
+	return err
+}
+
+func (w *Wal) rotateSegmentIfRequired(entry WalEntry) {
+
+}
+
 func (w *Wal) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -179,7 +216,13 @@ func (w *Wal) Close() error {
 		}
 	}
 
-	return w.dirLocker.Release()
+	err := w.dirLocker.Release()
+	if err != nil {
+		return err
+	}
+
+	w.closed = true
+	return nil
 }
 
 func createWalFile(dirpath string, idx int) (*Segment, error) {

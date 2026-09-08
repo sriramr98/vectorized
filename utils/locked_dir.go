@@ -4,7 +4,6 @@ import (
 	"errors"
 	"path/filepath"
 	"sync"
-	"sync/atomic"
 )
 
 var (
@@ -18,7 +17,7 @@ type LockedDir struct {
 	lockFile     *LockedFile
 	dirpath      string
 	lockFileName string
-	locked       atomic.Bool
+	locked       bool
 	mu           *sync.Mutex
 }
 
@@ -30,7 +29,7 @@ func NewLockedDir(dirpath string, lockFileName string) (*LockedDir, error) {
 	return &LockedDir{
 		dirpath:      dirpath,
 		lockFileName: lockFileName,
-		locked:       atomic.Bool{},
+		locked:       false,
 		mu:           &sync.Mutex{},
 	}, nil
 }
@@ -40,7 +39,7 @@ func (l *LockedDir) TryLock() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if l.locked.Load() {
+	if l.locked {
 		return ErrResourceAlreadyLocked
 	}
 	lockFilePath := filepath.Join(l.dirpath, l.lockFileName)
@@ -55,7 +54,7 @@ func (l *LockedDir) TryLock() error {
 		return err
 	}
 
-	l.locked.Store(true)
+	l.locked = true
 	l.lockFile = lockFile
 
 	return nil
@@ -65,7 +64,7 @@ func (l *LockedDir) Release() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	if !l.locked.Load() {
+	if !l.locked {
 		return ErrResourceNotLocked
 	}
 
@@ -74,6 +73,6 @@ func (l *LockedDir) Release() error {
 	}
 
 	l.lockFile = nil
-	l.locked.Store(false)
+	l.locked = false
 	return nil
 }
