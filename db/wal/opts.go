@@ -10,14 +10,12 @@ import (
 
 type WalOptions struct {
 	maxFileSizeMB uint64        // max size of open segment File before it's rotated
-	maxFileCount  uint          // max no of wal Files to be kept in the wal folder. Older ones can be deleted at any time
 	alwaysSync    bool          // always fsync when a wal entry is written. Expensive but highly durable. Either alwaysSync takes higher priority on syncDuration
 	syncInterval  time.Duration // time internal between two fsync calls of the same segment. Discarded if alwaysSync is set to true
 }
 
 var DefaultWalOpts = WalOptions{
 	maxFileSizeMB: 64,
-	maxFileCount:  10,
 	alwaysSync:    false,
 	syncInterval:  30 * time.Second,
 }

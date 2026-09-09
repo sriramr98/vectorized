@@ -81,35 +81,6 @@ func TestRotationPreservesRecordOrderAndDoesNotSplitRecords(t *testing.T) {
 	}
 }
 
-func TestRotationDiscardsOldSegmentsButKeepsTheActiveSegment(t *testing.T) {
-	walDir := t.TempDir()
-	w, err := NewWalWithOpts(walDir, WalOptions{
-		maxFileSizeMB: testSegmentSizeMB,
-		maxFileCount:  2,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer closeWal(t, w)
-
-	for i := range 4 {
-		if err := w.Write(bytes.Repeat([]byte{byte('a' + i)}, 700*1024), OpSet); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	paths := walSegmentPaths(t, walDir)
-	if len(paths) != 2 {
-		t.Fatalf("segment count = %d, want 2", len(paths))
-	}
-	if _, err := os.Stat(filepath.Join(walDir, NewWalFileName(w.openSegment.idx))); err != nil {
-		t.Fatalf("active segment was discarded: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(walDir, NewWalFileName(1))); !errors.Is(err, os.ErrNotExist) {
-		t.Fatalf("oldest segment still exists, stat error = %v", err)
-	}
-}
-
 func TestWriteAfterCloseIsRejected(t *testing.T) {
 	w, err := NewWalWithOpts(t.TempDir(), WalOptions{})
 	if err != nil {

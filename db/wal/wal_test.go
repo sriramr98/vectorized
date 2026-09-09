@@ -3,7 +3,7 @@ package wal
 import (
 	"os"
 	"path/filepath"
-	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -68,7 +68,7 @@ func TestNewWalDiscoversOnlyValidSegmentsAndAllocatesNextIndex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewWal() error = %v", err)
 	}
-	closeTestWal(t, w)
+	defer closeTestWal(t, w)
 
 	gotIndexes := make([]uint64, len(w.segments))
 	for i, segment := range w.segments {
@@ -77,7 +77,7 @@ func TestNewWalDiscoversOnlyValidSegmentsAndAllocatesNextIndex(t *testing.T) {
 			t.Fatalf("closed segment %d has an open file", segment.idx)
 		}
 	}
-	if want := []int{0, 3, 9, 10}; !reflect.DeepEqual(gotIndexes, want) {
+	if want := []uint64{0, 3, 9, 10}; slices.Compare(gotIndexes, want) != 0 {
 		t.Fatalf("discovered segment indexes = %v, want %v", gotIndexes, want)
 	}
 	if w.openSegment.idx != 11 {

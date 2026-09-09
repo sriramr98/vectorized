@@ -66,6 +66,7 @@ type Wal struct {
 	dirLocker          *utils.LockedDir
 	closed             bool
 	currentLSN         uint64
+	muSegmentCleanup   sync.Mutex
 }
 
 // NewWal creates a Wal with default options
