@@ -14,7 +14,7 @@ const testSegmentSizeMB = 1
 
 func TestWriteRotatesBeforeARecordWouldExceedTheSegmentLimit(t *testing.T) {
 	walDir := t.TempDir()
-	w, err := NewWal(walDir, WalOptions{maxFileSizeMB: testSegmentSizeMB})
+	w, err := NewWalWithOpts(walDir, WalOptions{maxFileSizeMB: testSegmentSizeMB})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -48,7 +48,7 @@ func TestWriteRotatesBeforeARecordWouldExceedTheSegmentLimit(t *testing.T) {
 
 func TestRotationPreservesRecordOrderAndDoesNotSplitRecords(t *testing.T) {
 	walDir := t.TempDir()
-	w, err := NewWal(walDir, WalOptions{maxFileSizeMB: testSegmentSizeMB})
+	w, err := NewWalWithOpts(walDir, WalOptions{maxFileSizeMB: testSegmentSizeMB})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestRotationPreservesRecordOrderAndDoesNotSplitRecords(t *testing.T) {
 
 func TestRotationDiscardsOldSegmentsButKeepsTheActiveSegment(t *testing.T) {
 	walDir := t.TempDir()
-	w, err := NewWal(walDir, WalOptions{
+	w, err := NewWalWithOpts(walDir, WalOptions{
 		maxFileSizeMB: testSegmentSizeMB,
 		maxFileCount:  2,
 	})
@@ -111,7 +111,7 @@ func TestRotationDiscardsOldSegmentsButKeepsTheActiveSegment(t *testing.T) {
 }
 
 func TestWriteAfterCloseIsRejected(t *testing.T) {
-	w, err := NewWal(t.TempDir(), WalOptions{})
+	w, err := NewWalWithOpts(t.TempDir(), WalOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +125,7 @@ func TestWriteAfterCloseIsRejected(t *testing.T) {
 
 func TestWriteAssignsStrictlyIncreasingLSNs(t *testing.T) {
 	walDir := t.TempDir()
-	w, err := NewWal(walDir, WalOptions{})
+	w, err := NewWalWithOpts(walDir, DefaultWalOpts)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +136,15 @@ func TestWriteAssignsStrictlyIncreasingLSNs(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	entries := readSegmentEntries(t, filepath.Join(walDir, NewWalFileName(1)))
+
+	// we need to sync to ensure page cache entries are flushed to disk
+	if err := w.openSegment.Sync(); err != nil {
+		t.Fatal(err)
+	}
+
+	fileName := w.openSegment.Name()
+
+	entries := readSegmentEntries(t, fileName)
 	if len(entries) != 3 {
 		t.Fatalf("entry count = %d, want 3", len(entries))
 	}
@@ -152,7 +160,7 @@ func TestWriteAssignsStrictlyIncreasingLSNs(t *testing.T) {
 // expected contract is Replay(func(WalEntry) error) error.
 func TestReplayReturnsEntriesInSegmentAndLSNOrder(t *testing.T) {
 	walDir := t.TempDir()
-	w, err := NewWal(walDir, WalOptions{maxFileSizeMB: testSegmentSizeMB})
+	w, err := NewWalWithOpts(walDir, WalOptions{maxFileSizeMB: testSegmentSizeMB})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +197,7 @@ func TestReplayReturnsEntriesInSegmentAndLSNOrder(t *testing.T) {
 
 func TestReplayIgnoresOrReportsOnlyTheIncompleteFinalRecord(t *testing.T) {
 	walDir := t.TempDir()
-	w, err := NewWal(walDir, WalOptions{})
+	w, err := NewWalWithOpts(walDir, WalOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}

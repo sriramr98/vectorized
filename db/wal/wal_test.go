@@ -10,7 +10,7 @@ import (
 func TestNewWalCreatesDirectoryAndFirstSegment(t *testing.T) {
 	walDir := filepath.Join(t.TempDir(), "nested", "wal")
 
-	w, err := NewWal(walDir, WalOptions{})
+	w, err := NewWal(walDir)
 	if err != nil {
 		t.Fatalf("NewWal() error = %v", err)
 	}
@@ -26,14 +26,8 @@ func TestNewWalCreatesDirectoryAndFirstSegment(t *testing.T) {
 	if len(w.segments) != 0 {
 		t.Fatalf("closed segments = %d, want 0", len(w.segments))
 	}
-	if w.openSegment == nil {
-		t.Fatal("open segment = nil")
-	}
-	if w.openSegment.idx != 1 {
-		t.Fatalf("open segment index = %d, want 1", w.openSegment.idx)
-	}
-	if w.openSegment.File == nil {
-		t.Fatal("open segment file = nil")
+	if w.openSegment != nil {
+		t.Fatal("open segment should be nil after close")
 	}
 
 	segmentPath := filepath.Join(wantDir, NewWalFileName(1))
@@ -43,9 +37,6 @@ func TestNewWalCreatesDirectoryAndFirstSegment(t *testing.T) {
 	}
 	if !info.Mode().IsRegular() {
 		t.Fatalf("first segment mode = %v, want regular file", info.Mode())
-	}
-	if w.openSegment.path != segmentPath {
-		t.Fatalf("open segment path = %q, want %q", w.openSegment.path, segmentPath)
 	}
 }
 
@@ -73,7 +64,7 @@ func TestNewWalDiscoversOnlyValidSegmentsAndAllocatesNextIndex(t *testing.T) {
 		}
 	}
 
-	w, err := NewWal(walDir, WalOptions{})
+	w, err := NewWalWithOpts(walDir, WalOptions{})
 	if err != nil {
 		t.Fatalf("NewWal() error = %v", err)
 	}
@@ -100,7 +91,7 @@ func TestNewWalDiscoversOnlyValidSegmentsAndAllocatesNextIndex(t *testing.T) {
 func TestNewWalExclusivelyLocksDirectory(t *testing.T) {
 	walDir := t.TempDir()
 
-	first, err := NewWal(walDir, WalOptions{})
+	first, err := NewWalWithOpts(walDir, WalOptions{})
 	if err != nil {
 		t.Fatalf("first NewWal() error = %v", err)
 	}
@@ -112,7 +103,7 @@ func TestNewWalExclusivelyLocksDirectory(t *testing.T) {
 		}
 	}()
 
-	if _, err := NewWal(walDir, WalOptions{}); err == nil {
+	if _, err := NewWalWithOpts(walDir, WalOptions{}); err == nil {
 		t.Fatal("second NewWal() error = nil, want an exclusive-lock error")
 	}
 
@@ -120,7 +111,7 @@ func TestNewWalExclusivelyLocksDirectory(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 	first = nil
-	second, err := NewWal(walDir, WalOptions{})
+	second, err := NewWalWithOpts(walDir, WalOptions{})
 	if err != nil {
 		t.Fatalf("NewWal() after Close() error = %v", err)
 	}
@@ -133,7 +124,7 @@ func TestNewWalRejectsFilePath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := NewWal(filePath, WalOptions{}); err == nil {
+	if _, err := NewWalWithOpts(filePath, WalOptions{}); err == nil {
 		t.Fatal("NewWal() error = nil, want an error for a file path")
 	}
 }

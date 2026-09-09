@@ -56,7 +56,7 @@ func (s *Segment) Close() error {
 }
 
 type Wal struct {
-	mu                 *sync.Mutex
+	mu                 sync.Mutex
 	dirpath            string
 	opts               WalOptions
 	segments           []*Segment
@@ -68,7 +68,13 @@ type Wal struct {
 	currentLSN         uint64
 }
 
-func NewWal(dirpath string, opts WalOptions) (*Wal, error) {
+// NewWal creates a Wal with default options
+func NewWal(dirpath string) (*Wal, error) {
+	return NewWalWithOpts(dirpath, DefaultWalOpts)
+}
+
+// NewWalWithOpts creates a Wal with custom options
+func NewWalWithOpts(dirpath string, opts WalOptions) (*Wal, error) {
 	dirpath, err := filepath.Abs(dirpath)
 	if err != nil {
 		return nil, err
@@ -124,7 +130,7 @@ func NewWal(dirpath string, opts WalOptions) (*Wal, error) {
 	}
 
 	return &Wal{
-		mu:          &sync.Mutex{},
+		mu:          sync.Mutex{},
 		dirpath:     dirpath,
 		opts:        opts,
 		segments:    segments,
@@ -205,17 +211,20 @@ func (w *Wal) Close() error {
 			return err
 		}
 	}
+	w.openSegment = nil
 
 	for _, segment := range w.segments {
 		if err := segment.Close(); err != nil {
 			return err
 		}
 	}
+	clear(w.segments)
 
 	err := w.dirLocker.Release()
 	if err != nil {
 		return err
 	}
+	w.dirLocker = nil
 
 	w.closed = true
 	return nil

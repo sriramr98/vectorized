@@ -15,6 +15,13 @@ type WalOptions struct {
 	syncInterval  time.Duration // time internal between two fsync calls of the same segment. Discarded if alwaysSync is set to true
 }
 
+var DefaultWalOpts = WalOptions{
+	maxFileSizeMB: 64,
+	maxFileCount:  10,
+	alwaysSync:    false,
+	syncInterval:  30 * time.Second,
+}
+
 type WalFileName string
 
 func NewWalFileName(idx uint64) string {
