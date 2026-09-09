@@ -4,14 +4,10 @@ import (
 	"bytes"
 	"cmp"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
-	"strconv"
-	"strings"
 	"sync"
-	"time"
 
 	"github.com/sriramr98/vectorized/utils"
 	"golang.org/x/sys/unix"
@@ -20,59 +16,23 @@ import (
 const FILE_PREFIX = "wal_segment"
 
 var (
-	ErrUnknownFileName = errors.New("unknown file name")
+	ErrUnknownFileName = errors.New("unknown File name")
 	ErrAlreadyClosed   = errors.New("wal already closed")
 )
 
-type WalOptions struct {
-	maxFileSizeMB uint64        // max size of open segment file before it's rotated
-	maxFileCount  uint          // max no of wal files to be kept in the wal folder. Older ones can be deleted at any time
-	alwaysSync    bool          // always fsync when a wal entry is written. Expensive but highly durable. Either alwaysSync takes higher priority on syncDuration
-	syncInterval  time.Duration // time internal between two fsync calls of the same segment. Discarded if alwaysSync is set to true
-}
-
-type WalFileName string
-
-func NewWalFileName(idx int) string {
-	return fmt.Sprintf("%s__%d", FILE_PREFIX, idx)
-}
-
-// Parse the name, validates and returns the index
-func (name WalFileName) Parse() (int, error) {
-	parts := strings.Split(string(name), "__")
-	if len(parts) != 2 {
-		return 0, ErrUnknownFileName
-	}
-
-	if parts[0] != FILE_PREFIX {
-		return 0, ErrUnknownFileName
-	}
-
-	idx, err := strconv.Atoi(parts[1])
-	if err != nil {
-		return 0, err
-	}
-
-	if idx < 0 {
-		return 0, errors.New("Error un-parseable wal index")
-	}
-
-	return idx, nil
-}
-
 type Segment struct {
-	idx  int
-	file *os.File
+	*os.File
+	idx  uint64
 	path string
-	mu   *sync.RWMutex
+	mu   sync.RWMutex
 }
 
-func NewSegment(file *os.File, path string, idx int) *Segment {
+func NewSegment(File *os.File, path string, idx uint64) *Segment {
 	return &Segment{
+		File: File,
 		idx:  idx,
-		file: file,
 		path: path,
-		mu:   &sync.RWMutex{},
+		mu:   sync.RWMutex{},
 	}
 }
 
@@ -80,25 +40,32 @@ func (s *Segment) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.file != nil {
-		if err := s.file.Sync(); err != nil {
+	if s.File != nil {
+		if err := s.Sync(); err != nil {
 			return err
 		}
 
-		return s.file.Close()
+		if err := s.File.Close(); err != nil {
+			return err
+		}
+
+		s.File = nil
 	}
 
 	return nil
 }
 
 type Wal struct {
-	mu          *sync.Mutex
-	dirpath     string
-	opts        WalOptions
-	segments    []*Segment
-	openSegment *Segment
-	dirLocker   *utils.LockedDir
-	closed      bool
+	mu                 *sync.Mutex
+	dirpath            string
+	opts               WalOptions
+	segments           []*Segment
+	openSegment        *Segment
+	currentSegmentSize uint64
+	latestSegmentId    uint64
+	dirLocker          *utils.LockedDir
+	closed             bool
+	currentLSN         uint64
 }
 
 func NewWal(dirpath string, opts WalOptions) (*Wal, error) {
@@ -120,15 +87,15 @@ func NewWal(dirpath string, opts WalOptions) (*Wal, error) {
 		return nil, err
 	}
 
-	files, err := os.ReadDir(dirpath)
+	Files, err := os.ReadDir(dirpath)
 	if err != nil {
 		return nil, err
 	}
 
 	var segments []*Segment
-	var lastMaxId int
+	var lastMaxId uint64
 
-	for _, entry := range files {
+	for _, entry := range Files {
 		if entry.IsDir() {
 			continue
 		}
@@ -136,21 +103,22 @@ func NewWal(dirpath string, opts WalOptions) (*Wal, error) {
 		name := WalFileName(entry.Name())
 		idx, err := name.Parse()
 		if err != nil {
-			// unknown file name. Skip
+			// unknown File name. Skip
 			continue
 		}
 
-		// we don't need to open file since we won't be writing to them
-		segments = append(segments, NewSegment(nil, filepath.Join(dirpath, entry.Name()), idx))
-		lastMaxId = max(lastMaxId, idx)
+		// we don't need to open File since we won't be writing to them
+		segments = append(segments, NewSegment(nil, filepath.Join(dirpath, entry.Name()), uint64(idx)))
+		lastMaxId = max(lastMaxId, uint64(idx))
 	}
 
 	slices.SortFunc(segments, func(a, b *Segment) int {
 		return cmp.Compare(a.idx, b.idx)
 	})
 
-	// we always create a new file for open segment even if previous file wasn't used to it's full capacity
-	openSegment, err := createWalFile(dirpath, lastMaxId+1)
+	// we always create a new File for open segment even if previous File wasn't used to it's full capacity
+	nextSegmentId := lastMaxId + 1
+	openSegment, err := createWalFile(dirpath, nextSegmentId)
 	if err != nil {
 		return nil, err
 	}
@@ -162,6 +130,9 @@ func NewWal(dirpath string, opts WalOptions) (*Wal, error) {
 		segments:    segments,
 		openSegment: openSegment,
 		dirLocker:   locker,
+		// every new wal initialization always creates a new segment for future writes which makes this simpler
+		currentSegmentSize: 0,
+		latestSegmentId:    uint64(nextSegmentId),
 	}, nil
 }
 
@@ -173,35 +144,60 @@ func (w *Wal) Write(data []byte, opType OpType) error {
 		return ErrAlreadyClosed
 	}
 
+	w.currentLSN += 1
 	entry := WalEntryV1{
-		LSN:    1, //TODO: Make dynamic
+		LSN:    w.currentLSN,
 		OpType: opType,
 		Data:   data,
 	}
 
-	w.rotateSegmentIfRequired(entry)
-
 	buf := bytes.NewBuffer([]byte{})
-	if err := entry.Encode(buf); err != nil {
+	n, err := entry.Encode(buf)
+	if err != nil {
 		return err
 	}
 
+	if w.currentSegmentSize+uint64(n) > utils.MBToBytes(w.opts.maxFileSizeMB) {
+		w.rotateSegment()
+	}
+
 	// Segment is opened with O_APPEND, so writes always append and seek to end automatically
-	_, err := w.openSegment.file.Write(buf.Bytes())
-	return err
+	if n, err = w.openSegment.File.Write(buf.Bytes()); err != nil {
+		return err
+	} else {
+		w.currentSegmentSize += uint64(n)
+		return nil
+	}
 }
 
-func (w *Wal) rotateSegmentIfRequired(entry WalEntry) {
+func (w *Wal) rotateSegment() error {
+	// Segment.Close will flush any in-memory changes to disk
+	if err := w.openSegment.Close(); err != nil {
+		return err
+	}
 
+	w.segments = append(w.segments, w.openSegment)
+
+	w.latestSegmentId = w.latestSegmentId + 1
+
+	newSegment, err := createWalFile(w.dirpath, w.latestSegmentId)
+	if err != nil {
+		return err
+	}
+
+	w.currentSegmentSize = 0
+	w.openSegment = newSegment
+
+	return nil
 }
 
 func (w *Wal) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if w.openSegment != nil && w.openSegment.file != nil {
+	if w.openSegment != nil && w.openSegment.File != nil {
 		// release lock before closing segments
-		if err := unix.Flock(int(w.openSegment.file.Fd()), unix.LOCK_UN); err != nil {
+		if err := unix.Flock(int(w.openSegment.File.Fd()), unix.LOCK_UN); err != nil {
 			return err
 		}
 
@@ -225,15 +221,15 @@ func (w *Wal) Close() error {
 	return nil
 }
 
-func createWalFile(dirpath string, idx int) (*Segment, error) {
-	file_name := NewWalFileName(idx)
-	file_path := filepath.Join(dirpath, file_name)
+func createWalFile(dirpath string, idx uint64) (*Segment, error) {
+	File_name := NewWalFileName(idx)
+	File_path := filepath.Join(dirpath, File_name)
 
-	file, err := os.OpenFile(file_path, os.O_RDWR|os.O_CREATE|os.O_APPEND, utils.PermFileReadWriteOwnerOnly)
+	File, err := os.OpenFile(File_path, os.O_RDWR|os.O_CREATE|os.O_APPEND, utils.PermFileReadWriteOwnerOnly)
 
 	if err != nil {
 		return nil, err
 	}
 
-	return NewSegment(file, file_path, idx), nil
+	return NewSegment(File, File_path, idx), nil
 }

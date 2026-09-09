@@ -32,7 +32,7 @@ func TestNewWalCreatesDirectoryAndFirstSegment(t *testing.T) {
 	if w.openSegment.idx != 1 {
 		t.Fatalf("open segment index = %d, want 1", w.openSegment.idx)
 	}
-	if w.openSegment.file == nil {
+	if w.openSegment.File == nil {
 		t.Fatal("open segment file = nil")
 	}
 
@@ -56,7 +56,6 @@ func TestNewWalDiscoversOnlyValidSegmentsAndAllocatesNextIndex(t *testing.T) {
 		NewWalFileName(3),
 		"not-a-wal",
 		"other__100",
-		NewWalFileName(-1),
 		NewWalFileName(0),
 		NewWalFileName(10),
 		NewWalFileName(7) + "/nested",
@@ -80,10 +79,10 @@ func TestNewWalDiscoversOnlyValidSegmentsAndAllocatesNextIndex(t *testing.T) {
 	}
 	closeTestWal(t, w)
 
-	gotIndexes := make([]int, len(w.segments))
+	gotIndexes := make([]uint64, len(w.segments))
 	for i, segment := range w.segments {
 		gotIndexes[i] = segment.idx
-		if segment.file != nil {
+		if segment.File != nil {
 			t.Fatalf("closed segment %d has an open file", segment.idx)
 		}
 	}
@@ -141,9 +140,8 @@ func TestNewWalRejectsFilePath(t *testing.T) {
 
 func closeTestWal(t *testing.T, w *Wal) {
 	t.Helper()
-	if w.openSegment != nil && w.openSegment.file != nil {
-		if err := w.openSegment.file.Close(); err != nil {
-			t.Fatalf("close open segment: %v", err)
-		}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
 	}
+
 }

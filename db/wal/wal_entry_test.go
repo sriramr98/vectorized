@@ -23,7 +23,7 @@ func TestWalEntryEncodeDecodeV1(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			if err := tt.entry.Encode(&buf); err != nil {
+			if _, err := tt.entry.Encode(&buf); err != nil {
 				t.Fatalf("Encode() error = %v", err)
 			}
 
@@ -41,7 +41,7 @@ func TestWalEntryEncodeDecodeV1(t *testing.T) {
 func TestWalEntryEncodeV1WireFormat(t *testing.T) {
 	entry := WalEntry{LSN: 0x0102030405060708, OpType: OpDelete, Data: []byte{0xaa, 0xbb}}
 	var buf bytes.Buffer
-	if err := entry.Encode(&buf); err != nil {
+	if _, err := entry.Encode(&buf); err != nil {
 		t.Fatal(err)
 	}
 
@@ -64,7 +64,7 @@ func TestWalEntryEncodeAppendsWithoutOverwritingBuffer(t *testing.T) {
 	var buf bytes.Buffer
 	buf.Write(prefix)
 
-	if err := entry.Encode(&buf); err != nil {
+	if _, err := entry.Encode(&buf); err != nil {
 		t.Fatal(err)
 	}
 	if !bytes.Equal(buf.Bytes()[:len(prefix)], prefix) {
@@ -83,7 +83,7 @@ func TestWalEntryEncodeAppendsWithoutOverwritingBuffer(t *testing.T) {
 func TestDecodeWalEntryRejectsInvalidRecords(t *testing.T) {
 	entry := WalEntry{LSN: 1, OpType: OpSet, Data: []byte("data")}
 	var buf bytes.Buffer
-	if err := entry.Encode(&buf); err != nil {
+	if _, err := entry.Encode(&buf); err != nil {
 		t.Fatal(err)
 	}
 	record := buf.Bytes()
@@ -127,7 +127,7 @@ func FuzzWalEntryEncodeDecodeV1(f *testing.F) {
 		}
 		entry := WalEntry{LSN: lsn, OpType: OpType(op), Data: data}
 		var buf bytes.Buffer
-		if err := entry.Encode(&buf); err != nil {
+		if _, err := entry.Encode(&buf); err != nil {
 			t.Fatal(err)
 		}
 		got, err := DecodeWalEntry(buf.Bytes())

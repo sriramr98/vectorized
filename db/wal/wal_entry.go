@@ -37,38 +37,39 @@ type WalEntryV1 struct {
 type WalEntry = WalEntryV1
 
 // Encode converts a V1 WalEntry into bytes for writing to disk.
-func (we WalEntryV1) Encode(buf *bytes.Buffer) error {
+// Returns the total number of bytes and
+func (we WalEntryV1) Encode(buf *bytes.Buffer) (int, error) {
 	if buf == nil {
-		return errors.New("wal entry: nil buffer")
+		return -1, errors.New("wal entry: nil buffer")
 	}
 
 	start := buf.Len()
 
 	// reserve space for checksum which gets calculated at the end
 	if err := binary.Write(buf, binary.BigEndian, uint32(0)); err != nil {
-		return err
+		return -1, err
 	}
 
 	if err := binary.Write(buf, binary.BigEndian, uint8(walEntryVersionV1)); err != nil {
-		return err
+		return -1, err
 	}
 
 	// Write headers
 	if err := binary.Write(buf, binary.BigEndian, we.LSN); err != nil {
-		return err
+		return -1, err
 	}
 
 	if err := binary.Write(buf, binary.BigEndian, we.OpType); err != nil {
-		return err
+		return -1, err
 	}
 
 	dataLen := uint32(len(we.Data))
 	if err := binary.Write(buf, binary.BigEndian, dataLen); err != nil {
-		return err
+		return -1, err
 	}
 
 	if _, err := buf.Write(we.Data); err != nil {
-		return err
+		return -1, err
 	}
 
 	serialized := buf.Bytes()[start:]
@@ -79,7 +80,9 @@ func (we WalEntryV1) Encode(buf *bytes.Buffer) error {
 	// Write the checksum to the beginning of the record
 	binary.BigEndian.PutUint32(serialized[:4], checksum)
 
-	return nil
+	totalLength := len(serialized)
+
+	return totalLength, nil
 }
 
 // DecodeWalEntry decodes a versioned WAL entry.

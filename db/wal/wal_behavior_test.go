@@ -92,7 +92,7 @@ func TestRotationDiscardsOldSegmentsButKeepsTheActiveSegment(t *testing.T) {
 	}
 	defer closeWal(t, w)
 
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		if err := w.Write(bytes.Repeat([]byte{byte('a' + i)}, 700*1024), OpSet); err != nil {
 			t.Fatal(err)
 		}
