@@ -9,6 +9,7 @@ import (
 	"net"
 
 	"github.com/sriramr98/vectorized/db"
+	"github.com/sriramr98/vectorized/db/wal"
 	"github.com/sriramr98/vectorized/protocol/command"
 	"github.com/sriramr98/vectorized/protocol/resp"
 )
@@ -16,11 +17,12 @@ import (
 // PublicTCPHandler serves the RESP protocol over a public client connection.
 type PublicTCPHandler struct {
 	store db.Store
+	wal   *wal.Wal
 }
 
 // NewPublicTCPHandler creates a public protocol handler backed by store.
-func NewPublicTCPHandler(store db.Store) *PublicTCPHandler {
-	return &PublicTCPHandler{store: store}
+func NewPublicTCPHandler(store db.Store, wal *wal.Wal) *PublicTCPHandler {
+	return &PublicTCPHandler{store: store, wal: wal}
 }
 
 // ServeConn implements tcpserver.Handler.

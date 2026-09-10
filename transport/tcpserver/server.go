@@ -77,11 +77,6 @@ func (s *Server) Serve(ctx context.Context) error {
 				return nil
 			}
 
-			var netErr net.Error
-			if errors.As(err, &netErr) && netErr.Temporary() {
-				s.logger.Warn("temporary accept failure", "error", err)
-				continue
-			}
 			return fmt.Errorf("accept TCP connection: %w", err)
 		}
 

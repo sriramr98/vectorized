@@ -3,11 +3,14 @@ package wal
 import (
 	"bytes"
 	"cmp"
+	"context"
 	"errors"
+	"log"
 	"os"
 	"path/filepath"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/sriramr98/vectorized/utils"
 	"golang.org/x/sys/unix"
@@ -66,16 +69,16 @@ type Wal struct {
 	dirLocker          *utils.LockedDir
 	closed             bool
 	currentLSN         uint64
-	muSegmentCleanup   sync.Mutex
+	syncTimer          *time.Timer
 }
 
 // NewWal creates a Wal with default options
-func NewWal(dirpath string) (*Wal, error) {
-	return NewWalWithOpts(dirpath, DefaultWalOpts)
+func NewWal(ctx context.Context, dirpath string) (*Wal, error) {
+	return NewWalWithOpts(ctx, dirpath, DefaultWalOpts)
 }
 
 // NewWalWithOpts creates a Wal with custom options
-func NewWalWithOpts(dirpath string, opts WalOptions) (*Wal, error) {
+func NewWalWithOpts(ctx context.Context, dirpath string, opts WalOptions) (*Wal, error) {
 	dirpath, err := filepath.Abs(dirpath)
 	if err != nil {
 		return nil, err
@@ -130,7 +133,7 @@ func NewWalWithOpts(dirpath string, opts WalOptions) (*Wal, error) {
 		return nil, err
 	}
 
-	return &Wal{
+	w := &Wal{
 		mu:          sync.Mutex{},
 		dirpath:     dirpath,
 		opts:        opts,
@@ -140,7 +143,12 @@ func NewWalWithOpts(dirpath string, opts WalOptions) (*Wal, error) {
 		// every new wal initialization always creates a new segment for future writes which makes this simpler
 		currentSegmentSize: 0,
 		latestSegmentId:    uint64(nextSegmentId),
-	}, nil
+		syncTimer:          time.NewTimer(opts.syncInterval),
+	}
+
+	go w.schedulePeriodicSync(ctx)
+
+	return w, nil
 }
 
 func (w *Wal) Write(data []byte, opType OpType) error {
@@ -165,7 +173,9 @@ func (w *Wal) Write(data []byte, opType OpType) error {
 	}
 
 	if w.currentSegmentSize+uint64(n) > utils.MBToBytes(w.opts.maxFileSizeMB) {
-		w.rotateSegment()
+		if err := w.rotateSegment(); err != nil {
+			return err
+		}
 	}
 
 	// Segment is opened with O_APPEND, so writes always append and seek to end automatically
@@ -195,7 +205,34 @@ func (w *Wal) rotateSegment() error {
 	w.currentSegmentSize = 0
 	w.openSegment = newSegment
 
+	w.syncTimer.Reset(w.opts.syncInterval)
+
 	return nil
+}
+
+func (w *Wal) schedulePeriodicSync(ctx context.Context) {
+	for {
+		select {
+		case <-w.syncTimer.C:
+			w.mu.Lock()
+
+			if w.closed {
+				w.syncTimer.Stop()
+				return
+			}
+
+			if err := w.openSegment.Sync(); err != nil {
+				log.Printf("error periodically syncing open segment: %s\n", err)
+			}
+
+			w.mu.Unlock()
+		case <-ctx.Done():
+			w.syncTimer.Stop()
+			w.syncTimer = nil
+			return
+		}
+
+	}
 }
 
 func (w *Wal) Close() error {
