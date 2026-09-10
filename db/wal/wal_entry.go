@@ -11,6 +11,7 @@ import (
 type OpType uint8
 
 const (
+	NoOp     OpType = 0
 	OpSet    OpType = 1
 	OpDelete OpType = 2
 )

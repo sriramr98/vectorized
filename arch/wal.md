@@ -4,6 +4,8 @@ A write-ahead log (WAL) protects acknowledged writes from being lost if the data
 
 Writes are appended to the WAL before they are applied to memory or confirmed to the client. On restart, the WAL can be replayed to restore those writes.
 
+The WAL is the source of truth; memory, disk, and replicas are materialized views. If applying a committed WAL entry to any of them fails, the entry must not be removed or rolled back from the WAL. The system should retry application or replay it during recovery, and should not acknowledge the client until the required durability and application policy is satisfied. WAL operations should therefore be safe to replay and, ideally, idempotent.
+
 ## WAL Layout
 
 The WAL is a directory containing ordered segment files. Each segment is named `wal_segment__<id>`, where `id` is a non-negative integer. Segment IDs define the order of the segments.

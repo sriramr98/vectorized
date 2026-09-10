@@ -2,15 +2,22 @@
 package command
 
 import (
+	"bytes"
+	"encoding/binary"
 	"fmt"
+	"io"
 	"strings"
 
+	"github.com/sriramr98/vectorized/db/wal"
 	"github.com/sriramr98/vectorized/protocol/resp"
 )
 
 // Command is a validated database operation.
 type Command interface {
-	command()
+	WalOpType() wal.OpType
+
+	//Returns a length encoded bytes of all of it's args in a defined order
+	LengthEncodedArgs() []byte
 }
 
 // Ping checks that the server is reachable.
@@ -35,11 +42,55 @@ type Delete struct {
 // Unknown represents a well-formed command not supported by this server.
 type Unknown struct{}
 
-func (Ping) command()    {}
-func (Set) command()     {}
-func (Get) command()     {}
-func (Delete) command()  {}
-func (Unknown) command() {}
+func (Ping) WalOpType() wal.OpType {
+	return wal.NoOp
+}
+func (s Ping) LengthEncodedArgs() []byte {
+	return []byte{}
+}
+
+func (Set) WalOpType() wal.OpType {
+	return wal.OpSet
+}
+func (s Set) LengthEncodedArgs() []byte {
+
+	buf := bytes.NewBuffer([]byte{})
+
+	// first write the number of args
+	binary.Write(buf, binary.BigEndian, 2)
+
+	// now length encode each arg
+	writeLengthEncoded(buf, s.Key)
+	writeLengthEncoded(buf, s.Value)
+
+	return buf.Bytes()
+}
+
+func (Get) WalOpType() wal.OpType {
+	return wal.NoOp
+}
+func (s Get) LengthEncodedArgs() []byte {
+	return []byte{}
+}
+func (Delete) WalOpType() wal.OpType {
+	return wal.OpDelete
+}
+func (s Delete) LengthEncodedArgs() []byte {
+	buf := bytes.NewBuffer([]byte{})
+	// First write the number of args
+	binary.Write(buf, binary.BigEndian, 1)
+
+	// now length encode the arg
+	writeLengthEncoded(buf, s.Key)
+
+	return buf.Bytes()
+}
+func (Unknown) WalOpType() wal.OpType {
+	return wal.NoOp
+}
+func (s Unknown) LengthEncodedArgs() []byte {
+	return []byte{}
+}
 
 // ArityError reports a supported command with the wrong number of arguments.
 type ArityError struct {
@@ -95,4 +146,15 @@ func requireArgumentCount(name string, arguments [][]byte, expected int) error {
 
 func clone(value []byte) []byte {
 	return append([]byte(nil), value...)
+}
+
+func writeLengthEncoded(w io.Writer, data []byte) {
+	length := len(data)
+	if length == 0 {
+		w.Write([]byte{})
+		return
+	}
+
+	binary.Write(w, binary.BigEndian, length)
+	w.Write(data)
 }

@@ -3,6 +3,8 @@ package resp
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -27,6 +29,21 @@ func (e *ProtocolError) Error() string {
 // validation belongs to the command package, not the wire-format parser.
 type Request struct {
 	Arguments [][]byte
+}
+
+// Creates a sequential bytes of run length encoded optionally skipping first N
+func (r Request) RunLengthEncodedArgs(skipN uint64) []byte {
+	args := r.Arguments[skipN:]
+
+	var buf *bytes.Buffer
+
+	for _, arg := range args {
+		length := len(arg)
+		binary.Write(buf, binary.BigEndian, length)
+		buf.Write(arg)
+	}
+
+	return buf.Bytes()
 }
 
 // ReadRequest reads one RESP array containing bulk-string arguments. Other

@@ -10,7 +10,7 @@ import (
 
 type WalOptions struct {
 	maxFileSizeMB uint64        // max size of open segment File before it's rotated
-	alwaysSync    bool          // always fsync when a wal entry is written. Expensive but highly durable. Either alwaysSync takes higher priority on syncDuration
+	alwaysSync    bool          // always fsync when a wal entry is written. periodic sync will be disabled
 	syncInterval  time.Duration // time internal between two fsync calls of the same segment. Discarded if alwaysSync is set to true
 }
 

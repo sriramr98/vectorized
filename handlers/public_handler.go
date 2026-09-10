@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 
 	"github.com/sriramr98/vectorized/db"
@@ -16,13 +17,14 @@ import (
 
 // PublicTCPHandler serves the RESP protocol over a public client connection.
 type PublicTCPHandler struct {
-	store db.Store
-	wal   *wal.Wal
+	store  db.Store
+	wal    *wal.Wal
+	logger *slog.Logger
 }
 
 // NewPublicTCPHandler creates a public protocol handler backed by store.
-func NewPublicTCPHandler(store db.Store, wal *wal.Wal) *PublicTCPHandler {
-	return &PublicTCPHandler{store: store, wal: wal}
+func NewPublicTCPHandler(store db.Store, wal *wal.Wal, logger *slog.Logger) *PublicTCPHandler {
+	return &PublicTCPHandler{store: store, wal: wal, logger: logger}
 }
 
 // ServeConn implements tcpserver.Handler.
@@ -55,7 +57,6 @@ func (h *PublicTCPHandler) ServeConn(ctx context.Context, conn net.Conn) error {
 			}
 			continue
 		}
-
 		if err := h.handleCommand(writer, parsedCommand); err != nil {
 			return err
 		}
@@ -66,6 +67,15 @@ func (h *PublicTCPHandler) ServeConn(ctx context.Context, conn net.Conn) error {
 }
 
 func (h *PublicTCPHandler) handleCommand(writer *bufio.Writer, parsed command.Command) error {
+
+	if parsed.WalOpType() != wal.NoOp {
+		encdedArg := parsed.LengthEncodedArgs()
+		if err := h.wal.Write(encdedArg, parsed.WalOpType()); err != nil {
+			h.logger.Error("unable to write op to wal", "error", err)
+			return resp.WriteError(writer, "ERR internal server error")
+		}
+	}
+
 	switch operation := parsed.(type) {
 	case command.Ping:
 		return resp.WriteSimpleString(writer, "PONG")

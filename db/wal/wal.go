@@ -139,6 +139,11 @@ func NewWalWithOpts(ctx context.Context, dirpath string, opts WalOptions) (*Wal,
 		return nil, err
 	}
 
+	var timer *time.Timer
+	if !opts.alwaysSync {
+		timer = time.NewTimer(opts.syncInterval)
+	}
+
 	w := &Wal{
 		mu:          sync.Mutex{},
 		dirpath:     dirpath,
@@ -149,10 +154,12 @@ func NewWalWithOpts(ctx context.Context, dirpath string, opts WalOptions) (*Wal,
 		// every new wal initialization always creates a new segment for future writes which makes this simpler
 		currentSegmentSize: 0,
 		latestSegmentId:    uint64(nextSegmentId),
-		syncTimer:          time.NewTimer(opts.syncInterval),
+		syncTimer:          timer,
 	}
 
-	go w.schedulePeriodicSync(ctx)
+	if !opts.alwaysSync {
+		go w.schedulePeriodicSync(ctx)
+	}
 
 	return w, nil
 }
@@ -189,6 +196,13 @@ func (w *Wal) Write(data []byte, opType OpType) error {
 		return err
 	} else {
 		w.currentSegmentSize += uint64(n)
+
+		if w.opts.alwaysSync {
+			if err := w.openSegment.Sync(); err != nil {
+				return err
+			}
+		}
+
 		return nil
 	}
 }

@@ -63,7 +63,7 @@ func runServer(cmd *cobra.Command) error {
 		logger.Error("listen failed", "address", listenAddress, "error", err)
 		return err
 	}
-	server := tcpserver.New(listener, handlers.NewPublicTCPHandler(store, walStore), logger)
+	server := tcpserver.New(listener, handlers.NewPublicTCPHandler(store, walStore, logger), logger)
 	logger.Info("server listening", "address", listener.Addr())
 	if err := server.Serve(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("server stopped unexpectedly", "error", err)
