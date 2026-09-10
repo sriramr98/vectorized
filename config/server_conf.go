@@ -14,17 +14,21 @@ import (
 )
 
 type ServerConfig struct {
-	Port int `koanf:"port"`
+	Port       int    `koanf:"port"`
+	WalDirPath string `koanf:"wal_dir_path"`
 }
 
 var defaultConfig = ServerConfig{
-	Port: 6380,
+	Port:       6380,
+	WalDirPath: defaultWalDir(),
 }
 
 func LoadConfig(path string, logger *slog.Logger) (ServerConfig, error) {
 	k := koanf.New(".")
+	// load default values into koanf
 	if err := k.Load(confmap.Provider(map[string]any{
-		"port": defaultConfig.Port,
+		"port":         defaultConfig.Port,
+		"wal_dir_path": defaultConfig.WalDirPath,
 	}, "."), nil); err != nil {
 		return ServerConfig{}, fmt.Errorf("load default config: %w", err)
 	}
@@ -65,10 +69,19 @@ func configFilePath(path string) (string, error) {
 	if path := "vectorized.yaml"; fileExists(path) {
 		return filepath.Abs(path)
 	}
-	if home, err := os.UserHomeDir(); err == nil {
-		return filepath.Join(home, ".vectorized", "config.yaml"), nil
+
+	if home, err := getProjectHomePath(); err == nil {
+		return filepath.Join(home, "config.yaml"), nil
 	}
 	return "", errors.New("unable to resolve any config path")
+}
+
+func getProjectHomePath() (string, error) {
+	if home, err := os.UserHomeDir(); err != nil {
+		return "", err
+	} else {
+		return filepath.Join(home, ".vectorized"), nil
+	}
 }
 
 func fileExists(path string) bool {
@@ -85,4 +98,14 @@ func readConfig(k *koanf.Koanf) (ServerConfig, error) {
 		return ServerConfig{}, fmt.Errorf("port must be between 1 and 65535, got %d", cfg.Port)
 	}
 	return cfg, nil
+}
+
+func defaultWalDir() string {
+	home, err := getProjectHomePath()
+	if err != nil {
+		slog.Error("unable to get project home path for wal", "error", err)
+		panic(err)
+	}
+
+	return home
 }

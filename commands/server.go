@@ -13,6 +13,7 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/sriramr98/vectorized/config"
 	"github.com/sriramr98/vectorized/db"
+	"github.com/sriramr98/vectorized/db/wal"
 	"github.com/sriramr98/vectorized/handlers"
 	"github.com/sriramr98/vectorized/transport/tcpserver"
 )
@@ -46,15 +47,23 @@ func runServer(cmd *cobra.Command) error {
 	}
 	logger.Info("server attempting to start", "port", port)
 	listenAddress := ":" + strconv.Itoa(port)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	store := db.NewMemoryStore()
+	walStore, err := wal.NewWal(ctx, serverConfig.WalDirPath)
+	if err != nil {
+		return err
+	}
+	defer walStore.Close()
+
 	listener, err := net.Listen("tcp", listenAddress)
 	if err != nil {
 		logger.Error("listen failed", "address", listenAddress, "error", err)
 		return err
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	store := db.NewMemoryStore()
-	server := tcpserver.New(listener, handlers.NewPublicTCPHandler(store), logger)
+	server := tcpserver.New(listener, handlers.NewPublicTCPHandler(store, walStore), logger)
 	logger.Info("server listening", "address", listener.Addr())
 	if err := server.Serve(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("server stopped unexpectedly", "error", err)

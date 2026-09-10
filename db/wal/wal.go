@@ -99,6 +99,9 @@ func NewWalWithOpts(ctx context.Context, dirpath string, opts WalOptions) (*Wal,
 
 	Files, err := os.ReadDir(dirpath)
 	if err != nil {
+		if err := locker.Release(); err != nil {
+			return nil, err
+		}
 		return nil, err
 	}
 
@@ -130,6 +133,9 @@ func NewWalWithOpts(ctx context.Context, dirpath string, opts WalOptions) (*Wal,
 	nextSegmentId := lastMaxId + 1
 	openSegment, err := createWalFile(dirpath, nextSegmentId)
 	if err != nil {
+		if err := locker.Release(); err != nil {
+			return nil, err
+		}
 		return nil, err
 	}
 
@@ -205,7 +211,9 @@ func (w *Wal) rotateSegment() error {
 	w.currentSegmentSize = 0
 	w.openSegment = newSegment
 
-	w.syncTimer.Reset(w.opts.syncInterval)
+	if w.syncTimer != nil {
+		w.syncTimer.Reset(w.opts.syncInterval)
+	}
 
 	return nil
 }
@@ -227,8 +235,13 @@ func (w *Wal) schedulePeriodicSync(ctx context.Context) {
 
 			w.mu.Unlock()
 		case <-ctx.Done():
-			w.syncTimer.Stop()
-			w.syncTimer = nil
+			w.mu.Lock()
+			defer w.mu.Unlock()
+
+			if w.syncTimer != nil {
+				w.syncTimer.Stop()
+				w.syncTimer = nil
+			}
 			return
 		}
 
