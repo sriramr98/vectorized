@@ -107,5 +107,5 @@ func defaultWalDir() string {
 		panic(err)
 	}
 
-	return home
+	return filepath.Join(home, "wal")
 }

@@ -18,12 +18,15 @@ import (
 // PublicTCPHandler serves the RESP protocol over a public client connection.
 type PublicTCPHandler struct {
 	store  db.Store
-	wal    *wal.Wal
+	wal    wal.Wal
 	logger *slog.Logger
 }
 
 // NewPublicTCPHandler creates a public protocol handler backed by store.
-func NewPublicTCPHandler(store db.Store, wal *wal.Wal, logger *slog.Logger) *PublicTCPHandler {
+func NewPublicTCPHandler(store db.Store, wal wal.Wal, logger *slog.Logger) *PublicTCPHandler {
+	if logger == nil {
+		logger = &slog.Logger{}
+	}
 	return &PublicTCPHandler{store: store, wal: wal, logger: logger}
 }
 

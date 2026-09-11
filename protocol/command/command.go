@@ -78,7 +78,7 @@ func (Delete) WalOpType() wal.OpType {
 func (s Delete) LengthEncodedArgs() []byte {
 	buf := bytes.NewBuffer([]byte{})
 	// First write the number of args
-	binary.Write(buf, binary.BigEndian, 1)
+	binary.Write(buf, binary.BigEndian, uint32(1))
 
 	// now length encode the arg
 	writeLengthEncoded(buf, s.Key)

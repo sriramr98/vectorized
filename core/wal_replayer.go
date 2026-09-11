@@ -3,17 +3,20 @@ package core
 import (
 	"encoding/binary"
 	"fmt"
+	"log/slog"
 
 	"github.com/sriramr98/vectorized/db"
 	"github.com/sriramr98/vectorized/db/wal"
 )
 
-func ReplayWal(walStore *wal.Wal, store db.Store) error {
+func ReplayWal(walStore wal.Wal, store db.Store) error {
 	return walStore.Replay(func(e wal.WalEntry) error {
 		args, err := decodeRunLengthEncoded(e.Data)
 		if err != nil {
 			return err
 		}
+
+		slog.Default().Info("adding entry to store", "op", e.OpType)
 
 		switch e.OpType {
 		case wal.OpSet:

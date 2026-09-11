@@ -15,7 +15,7 @@ const testSegmentSizeMB = 1
 
 func TestWriteRotatesBeforeARecordWouldExceedTheSegmentLimit(t *testing.T) {
 	walDir := t.TempDir()
-	w, err := NewWalWithOpts(walDir, WalOptions{maxFileSizeMB: testSegmentSizeMB})
+	w, err := NewWalWithOpts(context.TODO(), walDir, WalOptions{maxFileSizeMB: testSegmentSizeMB}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func TestWriteRotatesBeforeARecordWouldExceedTheSegmentLimit(t *testing.T) {
 
 func TestRotationPreservesRecordOrderAndDoesNotSplitRecords(t *testing.T) {
 	walDir := t.TempDir()
-	w, err := NewWalWithOpts(walDir, WalOptions{maxFileSizeMB: testSegmentSizeMB})
+	w, err := NewWalWithOpts(context.TODO(), walDir, WalOptions{maxFileSizeMB: testSegmentSizeMB}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestRotationPreservesRecordOrderAndDoesNotSplitRecords(t *testing.T) {
 }
 
 func TestWriteAfterCloseIsRejected(t *testing.T) {
-	w, err := NewWalWithOpts(t.TempDir(), WalOptions{})
+	w, err := NewWalWithOpts(context.TODO(), t.TempDir(), WalOptions{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +97,7 @@ func TestWriteAfterCloseIsRejected(t *testing.T) {
 
 func TestWriteAssignsStrictlyIncreasingLSNs(t *testing.T) {
 	walDir := t.TempDir()
-	w, err := NewWalWithOpts(walDir, DefaultWalOpts)
+	w, err := NewWalWithOpts(context.TODO(), walDir, DefaultWalOpts, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,15 +127,13 @@ func TestWriteAssignsStrictlyIncreasingLSNs(t *testing.T) {
 	}
 }
 
-// Replay is intentionally expressed as a small interface so this test file
-// can be added before the concrete Replay signature is finalized. The
-// expected contract is Replay(func(WalEntry) error) error.
 func TestReplayReturnsEntriesInSegmentAndLSNOrder(t *testing.T) {
 	walDir := t.TempDir()
-	w, err := NewWalWithOpts(walDir, WalOptions{maxFileSizeMB: testSegmentSizeMB})
+	w, err := NewWalWithOpts(context.TODO(), walDir, WalOptions{maxFileSizeMB: testSegmentSizeMB}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer w.Close()
 	for _, data := range [][]byte{
 		bytes.Repeat([]byte("a"), 700*1024),
 		bytes.Repeat([]byte("b"), 700*1024),
@@ -144,18 +142,9 @@ func TestReplayReturnsEntriesInSegmentAndLSNOrder(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if err := w.Close(); err != nil {
-		t.Fatal(err)
-	}
 
-	replayer, ok := any(w).(interface {
-		Replay(func(WalEntry) error) error
-	})
-	if !ok {
-		t.Skip("enable when Wal.Replay(func(WalEntry) error) error is implemented")
-	}
 	var got [][]byte
-	if err := replayer.Replay(func(entry WalEntry) error {
+	if err := w.Replay(func(entry WalEntry) error {
 		got = append(got, entry.Data)
 		return nil
 	}); err != nil {
@@ -167,16 +156,15 @@ func TestReplayReturnsEntriesInSegmentAndLSNOrder(t *testing.T) {
 	}
 }
 
-func TestReplayIgnoresOrReportsOnlyTheIncompleteFinalRecord(t *testing.T) {
+func TestReplayErrorsOnIncompleteRecord(t *testing.T) {
 	walDir := t.TempDir()
 	w, err := NewWalWithOpts(context.TODO(), walDir, WalOptions{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer w.Close()
+
 	if err := w.Write(OpSet, []byte("complete")); err != nil {
-		t.Fatal(err)
-	}
-	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
 
@@ -189,22 +177,14 @@ func TestReplayIgnoresOrReportsOnlyTheIncompleteFinalRecord(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	replayer, ok := any(w).(interface {
-		Replay(func(WalEntry) error) error
-	})
-	if !ok {
-		t.Skip("enable when Wal.Replay(func(WalEntry) error) error is implemented")
-	}
 	var got []WalEntry
-	err = replayer.Replay(func(entry WalEntry) error {
+	err = w.Replay(func(entry WalEntry) error {
 		got = append(got, entry)
 		return nil
 	})
-	if err != nil && len(got) != 1 {
-		t.Fatalf("Replay error = %v after %d valid entries, want valid prefix", err, len(got))
-	}
-	if len(got) != 1 || !bytes.Equal(got[0].Data, []byte("complete")) {
-		t.Fatalf("Replay returned %d entries, want the complete prefix record", len(got))
+
+	if err == nil {
+		t.Fatal("expected error when reading wal with corrupted record got none")
 	}
 }
 
@@ -253,7 +233,7 @@ func walSegmentPaths(t *testing.T, dir string) []string {
 	return paths
 }
 
-func closeWal(t *testing.T, w *Wal) {
+func closeWal(t *testing.T, w *DurableWal) {
 	t.Helper()
 	if err := w.Close(); err != nil {
 		t.Errorf("Close() error = %v", err)

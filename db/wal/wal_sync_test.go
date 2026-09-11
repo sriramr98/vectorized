@@ -2,20 +2,17 @@ package wal
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func TestPeriodicSyncMakesSubLimitWritesAvailableFromTheActiveSegment(t *testing.T) {
-	const interval = 25 * time.Millisecond
-
 	walDir := t.TempDir()
-	w, err := NewWalWithOpts(walDir, WalOptions{
+	w, err := NewWalWithOpts(context.TODO(), walDir, WalOptions{
 		maxFileSizeMB: 1,
-		syncInterval:  interval,
-	})
+	}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -23,14 +20,9 @@ func TestPeriodicSyncMakesSubLimitWritesAvailableFromTheActiveSegment(t *testing
 	defer closeWal(t, w)
 
 	data := []byte("periodically synced")
-	if err := w.Write(data, OpSet); err != nil {
+	if err := w.Write(OpSet, data); err != nil {
 		t.Fatal(err)
 	}
-
-	// The record is smaller than the segment limit, so it remains in the
-	// active segment. Give the periodic sync time to run, then verify that the
-	// complete record can be read from disk.
-	time.Sleep(2 * interval)
 
 	contents, err := os.ReadFile(filepath.Join(walDir, NewWalFileName(1)))
 	if err != nil {

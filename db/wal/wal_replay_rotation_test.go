@@ -13,7 +13,7 @@ func TestReplayReturnsEntriesAfterSegmentRotation(t *testing.T) {
 	w, err := NewWalWithOpts(
 		context.Background(),
 		walDir,
-		WalOptions{maxFileSizeMB: 1, alwaysSync: true},
+		WalOptions{maxFileSizeMB: 1},
 		slog.Default(),
 	)
 	if err != nil {

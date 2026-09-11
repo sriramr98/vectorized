@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sriramr98/vectorized/db"
+	"github.com/sriramr98/vectorized/db/wal"
 	"github.com/sriramr98/vectorized/handlers"
 )
 
@@ -17,7 +18,7 @@ func TestPublicTCPHandlerRespondsToPingAndUnknownCommands(t *testing.T) {
 
 	handlerDone := make(chan error, 1)
 	go func() {
-		handlerDone <- handlers.NewPublicTCPHandler(db.NewMemoryStore()).ServeConn(context.Background(), serverConn)
+		handlerDone <- handlers.NewPublicTCPHandler(db.NewMemoryStore(), wal.NewInMemWal(), nil).ServeConn(context.Background(), serverConn)
 		_ = serverConn.Close()
 	}()
 
@@ -43,7 +44,7 @@ func TestPublicTCPHandlerReportsMalformedRequests(t *testing.T) {
 
 	handlerDone := make(chan error, 1)
 	go func() {
-		handlerDone <- handlers.NewPublicTCPHandler(db.NewMemoryStore()).ServeConn(context.Background(), serverConn)
+		handlerDone <- handlers.NewPublicTCPHandler(db.NewMemoryStore(), wal.NewInMemWal(), nil).ServeConn(context.Background(), serverConn)
 		_ = serverConn.Close()
 	}()
 
@@ -71,7 +72,7 @@ func TestPublicTCPHandlerStoresValues(t *testing.T) {
 
 	handlerDone := make(chan error, 1)
 	go func() {
-		handlerDone <- handlers.NewPublicTCPHandler(db.NewMemoryStore()).ServeConn(context.Background(), serverConn)
+		handlerDone <- handlers.NewPublicTCPHandler(db.NewMemoryStore(), wal.NewInMemWal(), nil).ServeConn(context.Background(), serverConn)
 		_ = serverConn.Close()
 	}()
 

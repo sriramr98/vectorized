@@ -5,19 +5,14 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-	"time"
 )
 
 type WalOptions struct {
-	maxFileSizeMB uint64        // max size of open segment File before it's rotated
-	alwaysSync    bool          // always fsync when a wal entry is written. periodic sync will be disabled
-	syncInterval  time.Duration // time internal between two fsync calls of the same segment. Discarded if alwaysSync is set to true
+	maxFileSizeMB uint64 // max size of open segment File before it's rotated
 }
 
 var DefaultWalOpts = WalOptions{
 	maxFileSizeMB: 64,
-	alwaysSync:    false,
-	syncInterval:  30 * time.Second,
 }
 
 type WalFileName string

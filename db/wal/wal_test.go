@@ -1,6 +1,7 @@
 package wal
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"slices"
@@ -10,7 +11,7 @@ import (
 func TestNewWalCreatesDirectoryAndFirstSegment(t *testing.T) {
 	walDir := filepath.Join(t.TempDir(), "nested", "wal")
 
-	w, err := NewWal(walDir)
+	w, err := NewWal(context.TODO(), nil, walDir)
 	if err != nil {
 		t.Fatalf("NewWal() error = %v", err)
 	}
@@ -64,7 +65,7 @@ func TestNewWalDiscoversOnlyValidSegmentsAndAllocatesNextIndex(t *testing.T) {
 		}
 	}
 
-	w, err := NewWalWithOpts(walDir, WalOptions{})
+	w, err := NewWalWithOpts(context.TODO(), walDir, WalOptions{}, nil)
 	if err != nil {
 		t.Fatalf("NewWal() error = %v", err)
 	}
@@ -91,7 +92,7 @@ func TestNewWalDiscoversOnlyValidSegmentsAndAllocatesNextIndex(t *testing.T) {
 func TestNewWalExclusivelyLocksDirectory(t *testing.T) {
 	walDir := t.TempDir()
 
-	first, err := NewWalWithOpts(walDir, WalOptions{})
+	first, err := NewWalWithOpts(context.TODO(), walDir, WalOptions{}, nil)
 	if err != nil {
 		t.Fatalf("first NewWal() error = %v", err)
 	}
@@ -103,7 +104,7 @@ func TestNewWalExclusivelyLocksDirectory(t *testing.T) {
 		}
 	}()
 
-	if _, err := NewWalWithOpts(walDir, WalOptions{}); err == nil {
+	if _, err := NewWalWithOpts(context.TODO(), walDir, WalOptions{}, nil); err == nil {
 		t.Fatal("second NewWal() error = nil, want an exclusive-lock error")
 	}
 
@@ -111,7 +112,7 @@ func TestNewWalExclusivelyLocksDirectory(t *testing.T) {
 		t.Fatalf("Close() error = %v", err)
 	}
 	first = nil
-	second, err := NewWalWithOpts(walDir, WalOptions{})
+	second, err := NewWalWithOpts(context.TODO(), walDir, WalOptions{}, nil)
 	if err != nil {
 		t.Fatalf("NewWal() after Close() error = %v", err)
 	}
@@ -124,12 +125,12 @@ func TestNewWalRejectsFilePath(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := NewWalWithOpts(filePath, WalOptions{}); err == nil {
+	if _, err := NewWalWithOpts(context.TODO(), filePath, WalOptions{}, nil); err == nil {
 		t.Fatal("NewWal() error = nil, want an error for a file path")
 	}
 }
 
-func closeTestWal(t *testing.T, w *Wal) {
+func closeTestWal(t *testing.T, w *DurableWal) {
 	t.Helper()
 	if err := w.Close(); err != nil {
 		t.Fatal(err)

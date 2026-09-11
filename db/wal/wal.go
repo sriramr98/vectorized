@@ -8,13 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
 	"sync"
-	"time"
 
 	"github.com/sriramr98/vectorized/utils"
 	"golang.org/x/sys/unix"
@@ -27,15 +25,12 @@ var (
 	ErrAlreadyClosed   = errors.New("wal already closed")
 )
 
-type WalReader interface {
+type Wal interface {
 	Replay(func(WalEntry) error) error
+	Write(op OpType, data []byte) error
 }
 
-type WalWriter interface {
-	Write(op OpType, data []byte) (WalEntry, error)
-}
-
-type Wal struct {
+type DurableWal struct {
 	mu                 sync.Mutex
 	dirpath            string
 	opts               WalOptions
@@ -46,17 +41,19 @@ type Wal struct {
 	dirLocker          *utils.LockedDir
 	closed             bool
 	currentLSN         uint64
-	syncTimer          *time.Timer
 	logger             *slog.Logger
 }
 
 // NewWal creates a Wal with default options
-func NewWal(ctx context.Context, logger *slog.Logger, dirpath string) (*Wal, error) {
+func NewWal(ctx context.Context, logger *slog.Logger, dirpath string) (*DurableWal, error) {
 	return NewWalWithOpts(ctx, dirpath, DefaultWalOpts, logger)
 }
 
 // NewWalWithOpts creates a Wal with custom options
-func NewWalWithOpts(ctx context.Context, dirpath string, opts WalOptions, logger *slog.Logger) (*Wal, error) {
+func NewWalWithOpts(ctx context.Context, dirpath string, opts WalOptions, logger *slog.Logger) (*DurableWal, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	dirpath, err := filepath.Abs(dirpath)
 	if err != nil {
 		return nil, err
@@ -117,12 +114,7 @@ func NewWalWithOpts(ctx context.Context, dirpath string, opts WalOptions, logger
 		return nil, err
 	}
 
-	var timer *time.Timer
-	if !opts.alwaysSync {
-		timer = time.NewTimer(opts.syncInterval)
-	}
-
-	w := &Wal{
+	w := &DurableWal{
 		mu:          sync.Mutex{},
 		dirpath:     dirpath,
 		opts:        opts,
@@ -132,27 +124,26 @@ func NewWalWithOpts(ctx context.Context, dirpath string, opts WalOptions, logger
 		// every new wal initialization always creates a new segment for future writes which makes this simpler
 		currentSegmentSize: 0,
 		latestSegmentId:    uint64(nextSegmentId),
-		syncTimer:          timer,
 		logger:             logger,
 	}
 
 	var latestLSN uint64
-	w.Replay(func(e WalEntry) error {
-		if e.LSN > latestLSN {
-			return fmt.Errorf("WAL latest LSN %d is less than the current LSN from file %d", latestLSN, e.LSN)
+	if err := w.Replay(func(e WalEntry) error {
+		if e.LSN <= latestLSN {
+			return fmt.Errorf("WAL LSN %d is not greater than previous LSN %d", e.LSN, latestLSN)
 		}
+		latestLSN = e.LSN
 		return nil
-	})
-	w.currentLSN = latestLSN
-
-	if !opts.alwaysSync {
-		go w.schedulePeriodicSync(ctx)
+	}); err != nil {
+		_ = w.Close()
+		return nil, fmt.Errorf("recover WAL LSN: %w", err)
 	}
+	w.currentLSN = latestLSN
 
 	return w, nil
 }
 
-func (w *Wal) Write(opType OpType, data []byte) error {
+func (w *DurableWal) Write(opType OpType, data []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -161,6 +152,7 @@ func (w *Wal) Write(opType OpType, data []byte) error {
 	}
 
 	w.currentLSN += 1
+	w.logger.Debug("writing entry to wal", "lsn", w.currentLSN)
 	entry := WalEntryV1{
 		LSN:    w.currentLSN,
 		OpType: opType,
@@ -183,19 +175,17 @@ func (w *Wal) Write(opType OpType, data []byte) error {
 	if n, err = w.openSegment.File.Write(buf.Bytes()); err != nil {
 		return err
 	} else {
-		w.currentSegmentSize += uint64(n)
-
-		if w.opts.alwaysSync {
-			if err := w.openSegment.Sync(); err != nil {
-				return err
-			}
+		if err := w.openSegment.Sync(); err != nil {
+			return err
 		}
 
+		w.currentSegmentSize += uint64(n)
 		return nil
 	}
 }
 
-func (w *Wal) rotateSegment() error {
+func (w *DurableWal) rotateSegment() error {
+	w.logger.Debug("rotating segment")
 	// Segment.Close will flush any in-memory changes to disk
 	if err := w.openSegment.Close(); err != nil {
 		return err
@@ -213,46 +203,14 @@ func (w *Wal) rotateSegment() error {
 	w.currentSegmentSize = 0
 	w.openSegment = newSegment
 
-	if w.syncTimer != nil {
-		w.syncTimer.Reset(w.opts.syncInterval)
-	}
-
 	return nil
 }
 
-func (w *Wal) schedulePeriodicSync(ctx context.Context) {
-	for {
-		select {
-		case <-w.syncTimer.C:
-			w.mu.Lock()
-
-			if w.closed {
-				w.syncTimer.Stop()
-				return
-			}
-
-			if err := w.openSegment.Sync(); err != nil {
-				log.Printf("error periodically syncing open segment: %s\n", err)
-			}
-
-			w.mu.Unlock()
-		case <-ctx.Done():
-			w.mu.Lock()
-			defer w.mu.Unlock()
-
-			if w.syncTimer != nil {
-				w.syncTimer.Stop()
-				w.syncTimer = nil
-			}
-			return
-		}
-
-	}
-}
-
-func (w *Wal) Close() error {
+func (w *DurableWal) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
+
+	w.logger.Debug("closing wal")
 
 	if w.openSegment != nil && w.openSegment.File != nil {
 		// release lock before closing segments
@@ -285,7 +243,7 @@ func (w *Wal) Close() error {
 
 // Replay reads all existing segment files, including the active segment, and
 // emits entries in segment and LSN order.
-func (w *Wal) Replay(fn func(e WalEntry) error) error {
+func (w *DurableWal) Replay(fn func(e WalEntry) error) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
