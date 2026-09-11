@@ -4,8 +4,12 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	"encoding/binary"
 	"errors"
+	"fmt"
+	"io"
 	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
@@ -23,39 +27,12 @@ var (
 	ErrAlreadyClosed   = errors.New("wal already closed")
 )
 
-type Segment struct {
-	*os.File
-	idx  uint64
-	path string
-	mu   sync.RWMutex
+type WalReader interface {
+	Replay(func(WalEntry) error) error
 }
 
-func NewSegment(File *os.File, path string, idx uint64) *Segment {
-	return &Segment{
-		File: File,
-		idx:  idx,
-		path: path,
-		mu:   sync.RWMutex{},
-	}
-}
-
-func (s *Segment) Close() error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.File != nil {
-		if err := s.Sync(); err != nil {
-			return err
-		}
-
-		if err := s.File.Close(); err != nil {
-			return err
-		}
-
-		s.File = nil
-	}
-
-	return nil
+type WalWriter interface {
+	Write(op OpType, data []byte) (WalEntry, error)
 }
 
 type Wal struct {
@@ -70,15 +47,16 @@ type Wal struct {
 	closed             bool
 	currentLSN         uint64
 	syncTimer          *time.Timer
+	logger             *slog.Logger
 }
 
 // NewWal creates a Wal with default options
-func NewWal(ctx context.Context, dirpath string) (*Wal, error) {
-	return NewWalWithOpts(ctx, dirpath, DefaultWalOpts)
+func NewWal(ctx context.Context, logger *slog.Logger, dirpath string) (*Wal, error) {
+	return NewWalWithOpts(ctx, dirpath, DefaultWalOpts, logger)
 }
 
 // NewWalWithOpts creates a Wal with custom options
-func NewWalWithOpts(ctx context.Context, dirpath string, opts WalOptions) (*Wal, error) {
+func NewWalWithOpts(ctx context.Context, dirpath string, opts WalOptions, logger *slog.Logger) (*Wal, error) {
 	dirpath, err := filepath.Abs(dirpath)
 	if err != nil {
 		return nil, err
@@ -155,7 +133,17 @@ func NewWalWithOpts(ctx context.Context, dirpath string, opts WalOptions) (*Wal,
 		currentSegmentSize: 0,
 		latestSegmentId:    uint64(nextSegmentId),
 		syncTimer:          timer,
+		logger:             logger,
 	}
+
+	var latestLSN uint64
+	w.Replay(func(e WalEntry) error {
+		if e.LSN > latestLSN {
+			return fmt.Errorf("WAL latest LSN %d is less than the current LSN from file %d", latestLSN, e.LSN)
+		}
+		return nil
+	})
+	w.currentLSN = latestLSN
 
 	if !opts.alwaysSync {
 		go w.schedulePeriodicSync(ctx)
@@ -164,7 +152,7 @@ func NewWalWithOpts(ctx context.Context, dirpath string, opts WalOptions) (*Wal,
 	return w, nil
 }
 
-func (w *Wal) Write(data []byte, opType OpType) error {
+func (w *Wal) Write(opType OpType, data []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -293,6 +281,92 @@ func (w *Wal) Close() error {
 
 	w.closed = true
 	return nil
+}
+
+// Replay reads all existing segment files, including the active segment, and
+// emits entries in segment and LSN order.
+func (w *Wal) Replay(fn func(e WalEntry) error) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	if w.closed {
+		return ErrAlreadyClosed
+	}
+
+	var previousLSN uint64
+
+	segments := append(slices.Clone(w.segments), w.openSegment)
+	for _, segment := range segments {
+		if segment == nil {
+			continue
+		}
+
+		if len(segment.entryCache) > 0 {
+			for _, entry := range segment.entryCache {
+				previousLSN = entry.LSN
+				if err := fn(entry); err != nil {
+					return err
+				}
+			}
+			continue
+		}
+
+		file, err := os.Open(segment.path)
+		if err != nil {
+			return fmt.Errorf("open WAL segment %q: %w", segment.path, err)
+		}
+
+		err = replaySegment(file, func(entry WalEntry) error {
+			if entry.LSN <= previousLSN {
+				return fmt.Errorf("WAL LSN %d is not greater than previous LSN %d", entry.LSN, previousLSN)
+			}
+
+			segment.entryCache = append(segment.entryCache, entry)
+			previousLSN = entry.LSN
+			return fn(entry)
+		})
+		closeErr := file.Close()
+		if err != nil {
+			return fmt.Errorf("replay WAL segment %q: %w", segment.path, err)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close WAL segment %q: %w", segment.path, closeErr)
+		}
+	}
+
+	return nil
+}
+
+func replaySegment(r io.Reader, fn func(WalEntry) error) error {
+	header := make([]byte, walEntryHeaderSize)
+	for {
+		// first read header bytes to identify body lenth
+		n, err := io.ReadFull(r, header)
+		if err == io.EOF && n == 0 {
+			return nil // clean end between records
+		}
+		if err != nil {
+			return fmt.Errorf("read WAL header: %w", err)
+		}
+
+		// this represents the body length
+		dataLen := binary.BigEndian.Uint32(header[14:18])
+		record := make([]byte, walEntryHeaderSize+int(dataLen))
+		copy(record, header)
+
+		// read body
+		if _, err := io.ReadFull(r, record[walEntryHeaderSize:]); err != nil {
+			return fmt.Errorf("read WAL record body: %w", err)
+		}
+
+		entry, err := DecodeWalEntry(record)
+		if err != nil {
+			return err
+		}
+		if err := fn(entry); err != nil {
+			return err
+		}
+	}
 }
 
 func createWalFile(dirpath string, idx uint64) (*Segment, error) {

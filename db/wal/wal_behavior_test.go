@@ -2,6 +2,7 @@ package wal
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -22,10 +23,10 @@ func TestWriteRotatesBeforeARecordWouldExceedTheSegmentLimit(t *testing.T) {
 
 	first := bytes.Repeat([]byte("a"), 700*1024)
 	second := bytes.Repeat([]byte("b"), 700*1024)
-	if err := w.Write(first, OpSet); err != nil {
+	if err := w.Write(OpSet, first); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.Write(second, OpDelete); err != nil {
+	if err := w.Write(OpDelete, second); err != nil {
 		t.Fatal(err)
 	}
 
@@ -60,7 +61,7 @@ func TestRotationPreservesRecordOrderAndDoesNotSplitRecords(t *testing.T) {
 		bytes.Repeat([]byte("3"), 600*1024),
 	}
 	for _, data := range writes {
-		if err := w.Write(data, OpSet); err != nil {
+		if err := w.Write(OpSet, data); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -89,7 +90,7 @@ func TestWriteAfterCloseIsRejected(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.Write([]byte("after close"), OpSet); !errors.Is(err, ErrAlreadyClosed) {
+	if err := w.Write(OpSet, []byte("after close")); !errors.Is(err, ErrAlreadyClosed) {
 		t.Fatalf("Write after Close() error = %v, want %v", err, ErrAlreadyClosed)
 	}
 }
@@ -103,7 +104,7 @@ func TestWriteAssignsStrictlyIncreasingLSNs(t *testing.T) {
 	defer closeWal(t, w)
 
 	for _, data := range [][]byte{[]byte("one"), []byte("two"), []byte("three")} {
-		if err := w.Write(data, OpSet); err != nil {
+		if err := w.Write(OpSet, data); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -139,7 +140,7 @@ func TestReplayReturnsEntriesInSegmentAndLSNOrder(t *testing.T) {
 		bytes.Repeat([]byte("a"), 700*1024),
 		bytes.Repeat([]byte("b"), 700*1024),
 	} {
-		if err := w.Write(data, OpSet); err != nil {
+		if err := w.Write(OpSet, data); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -168,11 +169,11 @@ func TestReplayReturnsEntriesInSegmentAndLSNOrder(t *testing.T) {
 
 func TestReplayIgnoresOrReportsOnlyTheIncompleteFinalRecord(t *testing.T) {
 	walDir := t.TempDir()
-	w, err := NewWalWithOpts(walDir, WalOptions{})
+	w, err := NewWalWithOpts(context.TODO(), walDir, WalOptions{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := w.Write([]byte("complete"), OpSet); err != nil {
+	if err := w.Write(OpSet, []byte("complete")); err != nil {
 		t.Fatal(err)
 	}
 	if err := w.Close(); err != nil {

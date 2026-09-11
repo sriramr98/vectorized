@@ -70,7 +70,7 @@ func (h *PublicTCPHandler) handleCommand(writer *bufio.Writer, parsed command.Co
 
 	if parsed.WalOpType() != wal.NoOp {
 		encdedArg := parsed.LengthEncodedArgs()
-		if err := h.wal.Write(encdedArg, parsed.WalOpType()); err != nil {
+		if err := h.wal.Write(parsed.WalOpType(), encdedArg); err != nil {
 			h.logger.Error("unable to write op to wal", "error", err)
 			return resp.WriteError(writer, "ERR internal server error")
 		}

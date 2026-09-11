@@ -1,0 +1,53 @@
+package wal
+
+import (
+	"bytes"
+	"context"
+	"log/slog"
+	"reflect"
+	"testing"
+)
+
+func TestReplayReturnsEntriesAfterSegmentRotation(t *testing.T) {
+	walDir := t.TempDir()
+	w, err := NewWalWithOpts(
+		context.Background(),
+		walDir,
+		WalOptions{maxFileSizeMB: 1, alwaysSync: true},
+		slog.Default(),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if err := w.Close(); err != nil {
+			t.Errorf("close WAL: %v", err)
+		}
+	}()
+
+	want := []WalEntry{
+		{LSN: 1, OpType: OpSet, Data: bytes.Repeat([]byte("a"), 700*1024)},
+		{LSN: 2, OpType: OpDelete, Data: bytes.Repeat([]byte("b"), 700*1024)},
+	}
+	for _, entry := range want {
+		if err := w.Write(entry.OpType, entry.Data); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if got := w.openSegment.idx; got != 2 {
+		t.Fatalf("active segment = %d, want 2 after rotation", got)
+	}
+
+	var got []WalEntry
+	if err := w.Replay(func(entry WalEntry) error {
+		got = append(got, entry)
+		return nil
+	}); err != nil {
+		t.Fatalf("Replay() error = %v", err)
+	}
+
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Replay() entries differ from writes: got %d entries, want %d", len(got), len(want))
+	}
+}

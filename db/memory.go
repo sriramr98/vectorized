@@ -1,6 +1,8 @@
 package db
 
-import "sync"
+import (
+	"sync"
+)
 
 // MemoryStore is a concurrency-safe in-memory Store implementation.
 type MemoryStore struct {

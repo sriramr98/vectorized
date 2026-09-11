@@ -57,7 +57,7 @@ func (s Set) LengthEncodedArgs() []byte {
 	buf := bytes.NewBuffer([]byte{})
 
 	// first write the number of args
-	binary.Write(buf, binary.BigEndian, 2)
+	binary.Write(buf, binary.BigEndian, uint32(2))
 
 	// now length encode each arg
 	writeLengthEncoded(buf, s.Key)
@@ -149,12 +149,7 @@ func clone(value []byte) []byte {
 }
 
 func writeLengthEncoded(w io.Writer, data []byte) {
-	length := len(data)
-	if length == 0 {
-		w.Write([]byte{})
-		return
-	}
-
+	length := uint32(len(data))
 	binary.Write(w, binary.BigEndian, length)
 	w.Write(data)
 }

@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/sriramr98/vectorized/config"
+	"github.com/sriramr98/vectorized/core"
 	"github.com/sriramr98/vectorized/db"
 	"github.com/sriramr98/vectorized/db/wal"
 	"github.com/sriramr98/vectorized/handlers"
@@ -52,11 +53,15 @@ func runServer(cmd *cobra.Command) error {
 	defer stop()
 
 	store := db.NewMemoryStore()
-	walStore, err := wal.NewWal(ctx, serverConfig.WalDirPath)
+	walStore, err := wal.NewWal(ctx, logger, serverConfig.WalDirPath)
 	if err != nil {
 		return err
 	}
 	defer walStore.Close()
+
+	if err := core.ReplayWal(walStore, store); err != nil {
+		return err
+	}
 
 	listener, err := net.Listen("tcp", listenAddress)
 	if err != nil {
