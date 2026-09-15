@@ -18,17 +18,17 @@
 
   The most important missing tests are:
 
-  [] updating an existing key when WAL append fails;
-  [] inserting a new key when WAL append fails;
-  [] verifying WAL happens before memory application;
-  [] deleting a missing key;
-  [] real close/reopen recovery through Engine;
-  [] replay → append → replay;
-  [] replay callback failure followed by another replay;
-  [] torn final header and torn final body;
-  [] corrupt complete record;
-  [] oversized declared record;
-  [] recovery failure without publishing partial state.
+  [x] updating an existing key when WAL append fails;
+  [x] inserting a new key when WAL append fails;
+  [x] verifying WAL happens before memory application;
+  [x] deleting a missing key;
+  [x] real close/reopen recovery through Engine;
+  [x] replay → append → replay, with open segments excluded;
+  [x] replay callback failure followed by another replay;
+  [x] torn final header and torn final body;
+  [x] corrupt complete record;
+  [x] oversized declared record;
+  [x] recovery failure without publishing partial state.
 
   ## Small action list
 

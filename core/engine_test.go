@@ -3,6 +3,7 @@ package core
 import (
 	"bytes"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/sriramr98/vectorized/db"
@@ -118,6 +119,108 @@ func TestSetResetsReusedEncodingBuffer(t *testing.T) {
 	}
 }
 
+func TestSetExistingKeyRemainsUnchangedWhenWALWriteFails(t *testing.T) {
+	store := db.NewMemoryStore()
+	if err := store.Set([]byte("key"), []byte("old")); err != nil {
+		t.Fatal(err)
+	}
+	wantErr := errors.New("WAL write failed")
+	engine := NewEngine(store, &engineTestWal{writeErr: wantErr})
+
+	if err := engine.Set([]byte("key"), []byte("new")); !errors.Is(err, wantErr) {
+		t.Fatalf("Set() error = %v, want %v", err, wantErr)
+	}
+	assertEngineValue(t, engine, "key", "old")
+}
+
+func TestSetNewKeyRemainsAbsentWhenWALWriteFails(t *testing.T) {
+	wantErr := errors.New("WAL write failed")
+	engine := NewEngine(db.NewMemoryStore(), &engineTestWal{writeErr: wantErr})
+
+	if err := engine.Set([]byte("key"), []byte("value")); !errors.Is(err, wantErr) {
+		t.Fatalf("Set() error = %v, want %v", err, wantErr)
+	}
+	if _, err := engine.Get([]byte("key")); !errors.Is(err, ErrKeyNotFound) {
+		t.Fatalf("Get(key) error = %v, want %v", err, ErrKeyNotFound)
+	}
+}
+
+func TestSetWritesWALBeforeApplyingMemory(t *testing.T) {
+	var events []string
+	w := &orderedEngineTestWal{events: &events}
+	store := &orderedEngineTestStore{MemoryStore: db.NewMemoryStore(), events: &events}
+	engine := NewEngine(store, w)
+
+	if err := engine.Set([]byte("key"), []byte("value")); err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"wal", "memory"}; !slices.Equal(events, want) {
+		t.Fatalf("mutation order = %v, want %v", events, want)
+	}
+}
+
+func TestSetReportsMemoryFailureAfterWALWrite(t *testing.T) {
+	w := &engineTestWal{}
+	store := &failingSetEngineTestStore{
+		MemoryStore: db.NewMemoryStore(),
+		err:         errors.New("memory write failed"),
+	}
+	engine := NewEngine(store, w)
+
+	if err := engine.Set([]byte("key"), []byte("value")); err == nil {
+		t.Fatal("Set() error = nil, want memory-application error")
+	}
+	if len(w.writes) != 1 {
+		t.Fatalf("WAL writes = %d, want 1 committed write", len(w.writes))
+	}
+	if _, found := store.Get([]byte("key")); found {
+		t.Fatal("memory contains key after failed application")
+	}
+}
+
+func TestEngineRecoversFromDurableWALAfterReopen(t *testing.T) {
+	walDir := t.TempDir()
+	firstWal, err := wal.NewWal(nil, walDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstEngine := NewEngine(db.NewMemoryStore(), firstWal)
+	if err := firstEngine.Set([]byte("kept"), []byte("value")); err != nil {
+		t.Fatal(err)
+	}
+	if err := firstEngine.Set([]byte("deleted"), []byte("value")); err != nil {
+		t.Fatal(err)
+	}
+	if deleted, err := firstEngine.Delete([]byte("deleted")); err != nil || !deleted {
+		t.Fatalf("Delete() = (%v, %v), want (true, nil)", deleted, err)
+	}
+	if err := firstEngine.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	secondWal, err := wal.NewWal(nil, walDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondEngine := NewEngine(db.NewMemoryStore(), secondWal)
+	defer func() {
+		if err := secondEngine.Close(); err != nil {
+			t.Errorf("close recovered engine: %v", err)
+		}
+	}()
+	count, err := secondEngine.Recover()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 3 {
+		t.Fatalf("Recover() count = %d, want 3", count)
+	}
+	assertEngineValue(t, secondEngine, "kept", "value")
+	if _, err := secondEngine.Get([]byte("deleted")); !errors.Is(err, ErrKeyNotFound) {
+		t.Fatalf("Get(deleted) error = %v, want %v", err, ErrKeyNotFound)
+	}
+}
+
 func assertEngineValue(t *testing.T, engine *Engine, key, want string) {
 	t.Helper()
 	got, err := engine.Get([]byte(key))
@@ -146,9 +249,13 @@ type engineTestWalWrite struct {
 type engineTestWal struct {
 	writes        []engineTestWalWrite
 	replayEntries []wal.WalEntry
+	writeErr      error
 }
 
 func (w *engineTestWal) Write(op wal.OpType, data []byte) error {
+	if w.writeErr != nil {
+		return w.writeErr
+	}
 	w.writes = append(w.writes, engineTestWalWrite{op: op, data: bytes.Clone(data)})
 	return nil
 }
@@ -163,3 +270,34 @@ func (w *engineTestWal) Replay(fn func(wal.WalEntry) error) (uint64, error) {
 }
 
 func (w *engineTestWal) Close() error { return nil }
+
+type orderedEngineTestWal struct {
+	events *[]string
+}
+
+func (w *orderedEngineTestWal) Write(wal.OpType, []byte) error {
+	*w.events = append(*w.events, "wal")
+	return nil
+}
+
+func (*orderedEngineTestWal) Replay(func(wal.WalEntry) error) (uint64, error) { return 0, nil }
+func (*orderedEngineTestWal) Close() error                                    { return nil }
+
+type orderedEngineTestStore struct {
+	*db.MemoryStore
+	events *[]string
+}
+
+func (s *orderedEngineTestStore) Set(key, value []byte) error {
+	*s.events = append(*s.events, "memory")
+	return s.MemoryStore.Set(key, value)
+}
+
+type failingSetEngineTestStore struct {
+	*db.MemoryStore
+	err error
+}
+
+func (s *failingSetEngineTestStore) Set([]byte, []byte) error {
+	return s.err
+}

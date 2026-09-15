@@ -256,8 +256,8 @@ func (w *DurableWal) Close() error {
 	return nil
 }
 
-// Replay reads all existing segment files, including the active segment, and
-// emits entries in segment and LSN order.
+// Replay reads closed segment files and emits entries in segment and LSN order.
+// The active segment is excluded because it can still receive writes.
 func (w *DurableWal) Replay(fn func(e WalEntry) error) (uint64, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -269,15 +269,10 @@ func (w *DurableWal) Replay(fn func(e WalEntry) error) (uint64, error) {
 	var previousLSN uint64
 	var logCount uint64
 
-	segments := append(slices.Clone(w.segments), w.openSegment)
-	tailSegment := w.openSegment
-	// A newly created active segment is empty during startup recovery. In that
-	// case, the final pre-existing segment is the only segment that may contain
-	// a torn final write from the previous process.
-	if w.openSegment == nil || w.currentSegmentSize == 0 {
-		if len(w.segments) > 0 {
-			tailSegment = w.segments[len(w.segments)-1]
-		}
+	segments := slices.Clone(w.segments)
+	var tailSegment *Segment
+	if len(segments) > 0 {
+		tailSegment = segments[len(segments)-1]
 	}
 	for _, segment := range segments {
 		if segment == nil {
@@ -286,6 +281,9 @@ func (w *DurableWal) Replay(fn func(e WalEntry) error) (uint64, error) {
 
 		if len(segment.entryCache) > 0 {
 			for _, entry := range segment.entryCache {
+				if entry.LSN <= previousLSN {
+					return 0, fmt.Errorf("WAL LSN %d is not greater than previous LSN %d", entry.LSN, previousLSN)
+				}
 				previousLSN = entry.LSN
 				logCount += 1
 				if err := fn(entry); err != nil {
@@ -300,12 +298,13 @@ func (w *DurableWal) Replay(fn func(e WalEntry) error) (uint64, error) {
 			return 0, fmt.Errorf("open WAL segment %q: %w", segment.path, err)
 		}
 
+		var decodedEntries []WalEntry
 		validSize, truncatedTail, replayErr := replaySegment(file, segment == tailSegment, func(entry WalEntry) error {
 			if entry.LSN <= previousLSN {
 				return fmt.Errorf("WAL LSN %d is not greater than previous LSN %d", entry.LSN, previousLSN)
 			}
 
-			segment.entryCache = append(segment.entryCache, entry)
+			decodedEntries = append(decodedEntries, entry)
 			previousLSN = entry.LSN
 			logCount += 1
 			return fn(entry)
@@ -321,10 +320,10 @@ func (w *DurableWal) Replay(fn func(e WalEntry) error) (uint64, error) {
 			if err := truncateAndSyncSegment(segment.path, validSize); err != nil {
 				return 0, fmt.Errorf("truncate torn WAL tail in segment %q: %w", segment.path, err)
 			}
-			if segment == w.openSegment {
-				w.currentSegmentSize = uint64(validSize)
-			}
 		}
+		// Publish the cache only after the complete segment and every callback
+		// succeeded. A failed replay must not turn a partial prefix into the cache.
+		segment.entryCache = decodedEntries
 	}
 
 	return logCount, nil

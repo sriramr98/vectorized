@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"log/slog"
 	"reflect"
+	"slices"
 	"testing"
 )
 
@@ -27,14 +28,15 @@ func TestReplayReturnsEntriesAfterSegmentRotation(t *testing.T) {
 		{LSN: 1, OpType: OpSet, Data: bytes.Repeat([]byte("a"), 700*1024)},
 		{LSN: 2, OpType: OpDelete, Data: bytes.Repeat([]byte("b"), 700*1024)},
 	}
-	for _, entry := range want {
+	writes := append(slices.Clone(want), WalEntry{OpType: OpSet, Data: bytes.Repeat([]byte("c"), 700*1024)})
+	for _, entry := range writes {
 		if err := w.Write(entry.OpType, entry.Data); err != nil {
 			t.Fatal(err)
 		}
 	}
 
-	if got := w.openSegment.idx; got != 2 {
-		t.Fatalf("active segment = %d, want 2 after rotation", got)
+	if got := w.openSegment.idx; got != 3 {
+		t.Fatalf("active segment = %d, want 3 after rotation", got)
 	}
 
 	var got []WalEntry
