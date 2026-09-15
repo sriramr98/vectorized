@@ -161,35 +161,180 @@ func TestReplayReturnsEntriesInSegmentAndLSNOrder(t *testing.T) {
 	}
 }
 
-func TestReplayErrorsOnIncompleteRecord(t *testing.T) {
+func TestReplayTruncatesIncompleteFinalRecord(t *testing.T) {
+	tests := []struct {
+		name   string
+		suffix func(t *testing.T) []byte
+	}{
+		{
+			name: "partial header",
+			suffix: func(t *testing.T) []byte {
+				return []byte{0xde, 0xad, 0xbe}
+			},
+		},
+		{
+			name: "partial body",
+			suffix: func(t *testing.T) []byte {
+				t.Helper()
+				var encoded bytes.Buffer
+				entry := WalEntry{LSN: 2, OpType: OpSet, Data: []byte("incomplete")}
+				if _, err := entry.Encode(&encoded); err != nil {
+					t.Fatal(err)
+				}
+				return encoded.Bytes()[:encoded.Len()-2]
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			walDir := t.TempDir()
+			w, err := NewWalWithOpts(context.TODO(), walDir, DefaultWalOpts, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer closeWal(t, w)
+
+			if err := w.Write(OpSet, []byte("complete")); err != nil {
+				t.Fatal(err)
+			}
+
+			path := filepath.Join(walDir, NewWalFileName(1))
+			before, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := file.Write(tt.suffix(t)); err != nil {
+				_ = file.Close()
+				t.Fatal(err)
+			}
+			if err := file.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			var got []WalEntry
+			n, err := w.Replay(func(entry WalEntry) error {
+				got = append(got, entry)
+				return nil
+			})
+			if err != nil {
+				t.Fatalf("Replay() error = %v, want torn final record ignored", err)
+			}
+			if n != 1 || len(got) != 1 || string(got[0].Data) != "complete" {
+				t.Fatalf("Replay() returned %d entries, want only the complete record", n)
+			}
+
+			after, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if after.Size() != before.Size() {
+				t.Fatalf("segment size after recovery = %d, want %d", after.Size(), before.Size())
+			}
+		})
+	}
+}
+
+func TestReplayRejectsIncompleteRecordBeforeFinalSegment(t *testing.T) {
 	walDir := t.TempDir()
-	w, err := NewWalWithOpts(context.TODO(), walDir, WalOptions{}, nil)
+	w, err := NewWalWithOpts(context.TODO(), walDir, WalOptions{maxFileSizeMB: testSegmentSizeMB}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer w.Close()
+	if err := w.Write(OpSet, bytes.Repeat([]byte("a"), 700*1024)); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Write(OpSet, bytes.Repeat([]byte("b"), 700*1024)); err != nil {
+		t.Fatal(err)
+	}
+	closeWal(t, w)
 
+	path := filepath.Join(walDir, NewWalFileName(1))
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write([]byte{0xde, 0xad, 0xbe}); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := NewWalWithOpts(context.TODO(), walDir, WalOptions{maxFileSizeMB: testSegmentSizeMB}, nil); err == nil {
+		t.Fatal("NewWalWithOpts() error = nil, want incomplete non-final record error")
+	}
+}
+
+func TestNewWalRecoversTornTailInLastExistingSegment(t *testing.T) {
+	walDir := t.TempDir()
+	w, err := NewWalWithOpts(context.TODO(), walDir, DefaultWalOpts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := w.Write(OpSet, []byte("complete")); err != nil {
 		t.Fatal(err)
 	}
+	closeWal(t, w)
 
 	path := filepath.Join(walDir, NewWalFileName(1))
-	contents, err := os.ReadFile(path)
+	before, err := os.Stat(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, append(contents, []byte{0xde, 0xad, 0xbe}...), 0o600); err != nil {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.Write([]byte{0xde, 0xad, 0xbe}); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	var got []WalEntry
-	_, err = w.Replay(func(entry WalEntry) error {
-		got = append(got, entry)
-		return nil
-	})
+	reopened, err := NewWalWithOpts(context.TODO(), walDir, DefaultWalOpts, nil)
+	if err != nil {
+		t.Fatalf("NewWalWithOpts() error = %v, want torn tail recovered", err)
+	}
+	defer closeWal(t, reopened)
+	if reopened.currentLSN != 1 {
+		t.Fatalf("current LSN after recovery = %d, want 1", reopened.currentLSN)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Size() != before.Size() {
+		t.Fatalf("segment size after startup recovery = %d, want %d", after.Size(), before.Size())
+	}
+}
 
-	if err == nil {
-		t.Fatal("expected error when reading wal with corrupted record got none")
+func TestReplayRejectsOversizedRecordBeforeAllocatingBody(t *testing.T) {
+	walDir := t.TempDir()
+	w, err := NewWalWithOpts(context.TODO(), walDir, DefaultWalOpts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeWal(t, w)
+
+	header := make([]byte, walEntryHeaderSize)
+	header[4] = byte(walEntryVersionV1)
+	binaryBigEndianPutUint32(header[14:18], MaxWalRecordDataBytes+1)
+	path := filepath.Join(walDir, NewWalFileName(1))
+	if err := os.WriteFile(path, header, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = w.Replay(func(WalEntry) error { return nil })
+	if !errors.Is(err, ErrWalRecordTooLarge) {
+		t.Fatalf("Replay() error = %v, want %v", err, ErrWalRecordTooLarge)
 	}
 }
 
@@ -220,6 +365,13 @@ func readSegmentEntries(t *testing.T, path string) []WalEntry {
 
 func binaryBigEndianUint32(data []byte) uint32 {
 	return uint32(data[0])<<24 | uint32(data[1])<<16 | uint32(data[2])<<8 | uint32(data[3])
+}
+
+func binaryBigEndianPutUint32(data []byte, value uint32) {
+	data[0] = byte(value >> 24)
+	data[1] = byte(value >> 16)
+	data[2] = byte(value >> 8)
+	data[3] = byte(value)
 }
 
 func walSegmentPaths(t *testing.T, dir string) []string {

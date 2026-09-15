@@ -257,6 +257,15 @@ func (w *DurableWal) Replay(fn func(e WalEntry) error) (uint64, error) {
 	var logCount uint64
 
 	segments := append(slices.Clone(w.segments), w.openSegment)
+	tailSegment := w.openSegment
+	// A newly created active segment is empty during startup recovery. In that
+	// case, the final pre-existing segment is the only segment that may contain
+	// a torn final write from the previous process.
+	if w.openSegment == nil || w.currentSegmentSize == 0 {
+		if len(w.segments) > 0 {
+			tailSegment = w.segments[len(w.segments)-1]
+		}
+	}
 	for _, segment := range segments {
 		if segment == nil {
 			continue
@@ -278,7 +287,7 @@ func (w *DurableWal) Replay(fn func(e WalEntry) error) (uint64, error) {
 			return 0, fmt.Errorf("open WAL segment %q: %w", segment.path, err)
 		}
 
-		err = replaySegment(file, func(entry WalEntry) error {
+		validSize, truncatedTail, replayErr := replaySegment(file, segment == tailSegment, func(entry WalEntry) error {
 			if entry.LSN <= previousLSN {
 				return fmt.Errorf("WAL LSN %d is not greater than previous LSN %d", entry.LSN, previousLSN)
 			}
@@ -289,47 +298,82 @@ func (w *DurableWal) Replay(fn func(e WalEntry) error) (uint64, error) {
 			return fn(entry)
 		})
 		closeErr := file.Close()
-		if err != nil {
-			return 0, fmt.Errorf("replay WAL segment %q: %w", segment.path, err)
+		if replayErr != nil {
+			return 0, fmt.Errorf("replay WAL segment %q: %w", segment.path, replayErr)
 		}
 		if closeErr != nil {
 			return 0, fmt.Errorf("close WAL segment %q: %w", segment.path, closeErr)
+		}
+		if truncatedTail {
+			if err := truncateAndSyncSegment(segment.path, validSize); err != nil {
+				return 0, fmt.Errorf("truncate torn WAL tail in segment %q: %w", segment.path, err)
+			}
+			if segment == w.openSegment {
+				w.currentSegmentSize = uint64(validSize)
+			}
 		}
 	}
 
 	return logCount, nil
 }
 
-func replaySegment(r io.Reader, fn func(WalEntry) error) error {
+func replaySegment(r io.Reader, allowTruncatedTail bool, fn func(WalEntry) error) (int64, bool, error) {
 	header := make([]byte, walEntryHeaderSize)
+	var validSize int64
 	for {
 		// first read header bytes to identify body lenth
 		n, err := io.ReadFull(r, header)
 		if err == io.EOF && n == 0 {
-			return nil // clean end between records
+			return validSize, false, nil // clean end between records
 		}
 		if err != nil {
-			return fmt.Errorf("read WAL header: %w", err)
+			if allowTruncatedTail && errors.Is(err, io.ErrUnexpectedEOF) {
+				return validSize, true, nil
+			}
+			return validSize, false, fmt.Errorf("read WAL header: %w", err)
 		}
 
 		// this represents the body length
 		dataLen := binary.BigEndian.Uint32(header[14:18])
+		if dataLen > MaxWalRecordDataBytes {
+			return validSize, false, fmt.Errorf("%w: %d bytes", ErrWalRecordTooLarge, dataLen)
+		}
 		record := make([]byte, walEntryHeaderSize+int(dataLen))
 		copy(record, header)
 
 		// read body
 		if _, err := io.ReadFull(r, record[walEntryHeaderSize:]); err != nil {
-			return fmt.Errorf("read WAL record body: %w", err)
+			if allowTruncatedTail && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
+				return validSize, true, nil
+			}
+			return validSize, false, fmt.Errorf("read WAL record body: %w", err)
 		}
 
 		entry, err := DecodeWalEntry(record)
 		if err != nil {
-			return err
+			return validSize, false, err
 		}
 		if err := fn(entry); err != nil {
-			return err
+			return validSize, false, err
 		}
+		validSize += int64(len(record))
 	}
+}
+
+func truncateAndSyncSegment(path string, size int64) error {
+	file, err := os.OpenFile(path, os.O_RDWR, utils.PermFileReadWriteOwnerOnly)
+	if err != nil {
+		return err
+	}
+	if err := file.Truncate(size); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	return file.Close()
 }
 
 func createWalFile(dirpath string, idx uint64) (*Segment, error) {
