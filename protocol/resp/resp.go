@@ -3,8 +3,6 @@ package resp
 
 import (
 	"bufio"
-	"bytes"
-	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -25,71 +23,52 @@ func (e *ProtocolError) Error() string {
 	return e.message
 }
 
-// Request is a well-framed RESP array of bulk-string arguments. Command
-// validation belongs to the command package, not the wire-format parser.
-type Request struct {
-	Arguments [][]byte
-}
-
-// Creates a sequential bytes of run length encoded optionally skipping first N
-func (r Request) RunLengthEncodedArgs(skipN uint64) []byte {
-	args := r.Arguments[skipN:]
-
-	var buf *bytes.Buffer
-
-	for _, arg := range args {
-		length := len(arg)
-		binary.Write(buf, binary.BigEndian, length)
-		buf.Write(arg)
-	}
-
-	return buf.Bytes()
-}
-
-// ReadRequest reads one RESP array containing bulk-string arguments. Other
+// Parse reads one RESP array containing bulk-string arguments. Other
 // RESP types are intentionally unsupported for now.
-func ReadRequest(reader *bufio.Reader) (Request, error) {
+func Parse(reader *bufio.Reader) ([][]byte, error) {
 	prefix, err := reader.ReadByte()
 	if err != nil {
-		return Request{}, err
+		return [][]byte{}, err
 	}
 	if prefix != '*' {
-		return Request{}, protocolError("expected array")
+		return [][]byte{}, protocolError("expected array")
 	}
 
 	argumentCount, err := readLength(reader, "array length", maxArguments)
 	if err != nil {
-		return Request{}, err
+		return [][]byte{}, err
 	}
 	if argumentCount == 0 {
-		return Request{}, protocolError("command array is empty")
+		return [][]byte{}, protocolError("command array is empty")
 	}
 
 	arguments := make([][]byte, argumentCount)
+
 	for i := range arguments {
 		prefix, err := reader.ReadByte()
 		if err != nil {
-			return Request{}, err
+			return [][]byte{}, err
 		}
 		if prefix != '$' {
-			return Request{}, protocolError("expected bulk string")
+			return [][]byte{}, protocolError("expected bulk string")
 		}
 
 		length, err := readLength(reader, "bulk string length", maxBulkBytes)
 		if err != nil {
-			return Request{}, err
+			return [][]byte{}, err
 		}
 		argument := make([]byte, length)
 		if _, err := io.ReadFull(reader, argument); err != nil {
-			return Request{}, err
+			return [][]byte{}, err
 		}
 		if err := expectCRLF(reader); err != nil {
-			return Request{}, err
+			return [][]byte{}, err
 		}
+
 		arguments[i] = argument
 	}
 
-	return Request{Arguments: arguments}, nil
+	return arguments, nil
 }
 
 // WriteSimpleString writes a RESP simple string. Callers must pass a value

@@ -12,14 +12,14 @@ import (
 func TestReadRequest(t *testing.T) {
 	reader := bufio.NewReader(strings.NewReader("*2\r\n$4\r\nPING\r\n$5\r\nhello\r\n"))
 
-	request, err := resp.ReadRequest(reader)
+	args, err := resp.Parse(reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got, want := string(request.Arguments[0]), "PING"; got != want {
+	if got, want := string(args[0]), "PING"; got != want {
 		t.Fatalf("first argument = %q, want %q", got, want)
 	}
-	if got, want := string(request.Arguments[1]), "hello"; got != want {
+	if got, want := string(args[1]), "hello"; got != want {
 		t.Fatalf("second argument = %q, want %q", got, want)
 	}
 }
@@ -27,7 +27,7 @@ func TestReadRequest(t *testing.T) {
 func TestReadRequestRejectsMalformedFrame(t *testing.T) {
 	reader := bufio.NewReader(strings.NewReader("*1\n$4\r\nPING\r\n"))
 
-	_, err := resp.ReadRequest(reader)
+	_, err := resp.Parse(reader)
 	var protocolError *resp.ProtocolError
 	if !errors.As(err, &protocolError) {
 		t.Fatalf("ReadRequest() error = %v, want protocol error", err)
