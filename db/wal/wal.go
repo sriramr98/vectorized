@@ -23,6 +23,7 @@ var (
 	ErrUnknownFileName = errors.New("unknown File name")
 	ErrAlreadyClosed   = errors.New("wal already closed")
 	ErrWalUnhealthy    = errors.New("wal is unhealthy")
+	ErrInvalidOptions  = errors.New("invalid WAL options")
 )
 
 type Wal interface {
@@ -53,6 +54,11 @@ func NewWal(logger *slog.Logger, dirpath string) (*DurableWal, error) {
 
 // NewWalWithOpts creates a Wal with custom options
 func NewWalWithOpts(dirpath string, opts WalOptions, logger *slog.Logger) (*DurableWal, error) {
+
+	if err := opts.Validate(); err != nil {
+		return nil, err
+	}
+
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -177,7 +183,7 @@ func (w *DurableWal) Write(opType OpType, data []byte) error {
 		return err
 	}
 
-	if w.currentSegmentSize+uint64(dataLen) > utils.MBToBytes(w.opts.maxFileSizeMB) {
+	if w.currentSegmentSize+uint64(dataLen) > utils.MBToBytes(w.opts.MaxFileSizeMB) {
 		if err := w.rotateSegment(); err != nil {
 			w.unhealthy = true
 			return err

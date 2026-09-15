@@ -16,7 +16,7 @@ const testSegmentSizeMB = 1
 
 func TestWriteRotatesBeforeARecordWouldExceedTheSegmentLimit(t *testing.T) {
 	walDir := t.TempDir()
-	w, err := NewWalWithOpts(walDir, WalOptions{maxFileSizeMB: testSegmentSizeMB}, nil)
+	w, err := NewWalWithOpts(walDir, WalOptions{MaxFileSizeMB: testSegmentSizeMB}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestWriteRotatesBeforeARecordWouldExceedTheSegmentLimit(t *testing.T) {
 
 func TestRotationPreservesRecordOrderAndDoesNotSplitRecords(t *testing.T) {
 	walDir := t.TempDir()
-	w, err := NewWalWithOpts(walDir, WalOptions{maxFileSizeMB: testSegmentSizeMB}, nil)
+	w, err := NewWalWithOpts(walDir, WalOptions{MaxFileSizeMB: testSegmentSizeMB}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestRotationPreservesRecordOrderAndDoesNotSplitRecords(t *testing.T) {
 }
 
 func TestWriteAfterCloseIsRejected(t *testing.T) {
-	w, err := NewWalWithOpts(t.TempDir(), WalOptions{}, nil)
+	w, err := NewWalWithOpts(t.TempDir(), DefaultWalOpts, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,6 +117,90 @@ func TestWriteRecordRejectsShortWrite(t *testing.T) {
 	}
 	if n != len(record)-1 {
 		t.Fatalf("writeRecord() bytes = %d, want %d", n, len(record)-1)
+	}
+}
+
+func TestWriteRejectsInvalidOperationWithoutChangingState(t *testing.T) {
+	w, err := NewWalWithOpts(t.TempDir(), DefaultWalOpts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeWal(t, w)
+
+	wantLSN := w.currentLSN
+	wantSize := w.currentSegmentSize
+	if err := w.Write(NoOp, []byte("invalid")); !errors.Is(err, ErrInvalidWalEntry) {
+		t.Fatalf("Write() error = %v, want %v", err, ErrInvalidWalEntry)
+	}
+	if w.currentLSN != wantLSN {
+		t.Fatalf("current LSN = %d, want unchanged %d", w.currentLSN, wantLSN)
+	}
+	if w.currentSegmentSize != wantSize {
+		t.Fatalf("current segment size = %d, want unchanged %d", w.currentSegmentSize, wantSize)
+	}
+}
+
+func TestAppendFailureMarksWalUnhealthy(t *testing.T) {
+	w, err := NewWalWithOpts(t.TempDir(), DefaultWalOpts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := w.openSegment.File.Close(); err != nil {
+		t.Fatal(err)
+	}
+	readOnly, err := os.Open(w.openSegment.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.openSegment.File = readOnly
+
+	if err := w.Write(OpSet, []byte("value")); err == nil {
+		t.Fatal("Write() error = nil, want append failure")
+	}
+	assertWalRejectsOperationsAsUnhealthy(t, w)
+	closeWalAfterInjectedFile(t, w)
+}
+
+func TestSyncFailureMarksWalUnhealthy(t *testing.T) {
+	w, err := NewWalWithOpts(t.TempDir(), DefaultWalOpts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := w.openSegment.File.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	w.openSegment.File = writer
+
+	if err := w.Write(OpSet, []byte("value")); err == nil {
+		t.Fatal("Write() error = nil, want sync failure")
+	}
+	assertWalRejectsOperationsAsUnhealthy(t, w)
+	closeWalAfterInjectedFile(t, w)
+}
+
+func TestRotationFailureMarksWalUnhealthy(t *testing.T) {
+	w, err := NewWalWithOpts(t.TempDir(), WalOptions{MaxFileSizeMB: testSegmentSizeMB}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := w.Write(OpSet, bytes.Repeat([]byte("a"), 700*1024)); err != nil {
+		t.Fatal(err)
+	}
+	w.dirpath = filepath.Join(t.TempDir(), "missing")
+	if err := w.Write(OpSet, bytes.Repeat([]byte("b"), 700*1024)); err == nil {
+		t.Fatal("Write() error = nil, want rotation failure")
+	}
+	assertWalRejectsOperationsAsUnhealthy(t, w)
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close() unhealthy WAL error = %v, want nil", err)
 	}
 }
 
@@ -154,7 +238,7 @@ func TestWriteAssignsStrictlyIncreasingLSNs(t *testing.T) {
 
 func TestReplayReturnsEntriesInSegmentAndLSNOrder(t *testing.T) {
 	walDir := t.TempDir()
-	w, err := NewWalWithOpts(walDir, WalOptions{maxFileSizeMB: testSegmentSizeMB}, nil)
+	w, err := NewWalWithOpts(walDir, WalOptions{MaxFileSizeMB: testSegmentSizeMB}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +272,7 @@ func TestReplayReturnsEntriesInSegmentAndLSNOrder(t *testing.T) {
 }
 
 func TestReplayExcludesOpenSegmentUntilItIsRotated(t *testing.T) {
-	w, err := NewWalWithOpts(t.TempDir(), WalOptions{maxFileSizeMB: testSegmentSizeMB}, nil)
+	w, err := NewWalWithOpts(t.TempDir(), WalOptions{MaxFileSizeMB: testSegmentSizeMB}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +308,7 @@ func TestReplayExcludesOpenSegmentUntilItIsRotated(t *testing.T) {
 }
 
 func TestReplayAfterCallbackFailureStillReturnsCompleteSegment(t *testing.T) {
-	w, err := NewWalWithOpts(t.TempDir(), WalOptions{maxFileSizeMB: testSegmentSizeMB}, nil)
+	w, err := NewWalWithOpts(t.TempDir(), WalOptions{MaxFileSizeMB: testSegmentSizeMB}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -342,7 +426,7 @@ func TestReplayTruncatesIncompleteFinalRecord(t *testing.T) {
 
 func TestReplayRejectsIncompleteRecordBeforeFinalSegment(t *testing.T) {
 	walDir := t.TempDir()
-	w, err := NewWalWithOpts(walDir, WalOptions{maxFileSizeMB: testSegmentSizeMB}, nil)
+	w, err := NewWalWithOpts(walDir, WalOptions{MaxFileSizeMB: testSegmentSizeMB}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -367,7 +451,7 @@ func TestReplayRejectsIncompleteRecordBeforeFinalSegment(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := NewWalWithOpts(walDir, WalOptions{maxFileSizeMB: testSegmentSizeMB}, nil); err == nil {
+	if _, err := NewWalWithOpts(walDir, WalOptions{MaxFileSizeMB: testSegmentSizeMB}, nil); err == nil {
 		t.Fatal("NewWalWithOpts() error = nil, want incomplete non-final record error")
 	}
 }
@@ -528,4 +612,28 @@ type shortWalWriter struct{}
 
 func (shortWalWriter) Write(p []byte) (int, error) {
 	return len(p) - 1, nil
+}
+
+func assertWalRejectsOperationsAsUnhealthy(t *testing.T, w *DurableWal) {
+	t.Helper()
+	if !w.unhealthy {
+		t.Fatal("WAL unhealthy = false, want true")
+	}
+	if err := w.Write(OpSet, []byte("after failure")); !errors.Is(err, ErrWalUnhealthy) {
+		t.Fatalf("Write() after failure error = %v, want %v", err, ErrWalUnhealthy)
+	}
+	if _, err := w.Replay(func(WalEntry) error { return nil }); !errors.Is(err, ErrWalUnhealthy) {
+		t.Fatalf("Replay() after failure error = %v, want %v", err, ErrWalUnhealthy)
+	}
+}
+
+func closeWalAfterInjectedFile(t *testing.T, w *DurableWal) {
+	t.Helper()
+	if w.openSegment != nil && w.openSegment.File != nil {
+		_ = w.openSegment.File.Close()
+		w.openSegment.File = nil
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("Close() unhealthy WAL error = %v, want nil", err)
+	}
 }

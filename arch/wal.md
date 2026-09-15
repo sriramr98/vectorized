@@ -4,6 +4,8 @@ A write-ahead log (WAL) protects acknowledged writes from being lost if the data
 
 Writes are appended to the WAL before they are applied to memory or confirmed to the client. On restart, the WAL can be replayed to restore those writes.
 
+Each successful write is synchronized to disk before `Write` returns. If segment rotation, append, or synchronization fails, the WAL becomes unhealthy and rejects further writes and replay. It must be closed and reopened before use so startup recovery can validate and, when appropriate, repair the log.
+
 The WAL is the source of truth; memory, disk, and replicas are materialized views. If applying a committed WAL entry to any of them fails, the entry must not be removed or rolled back from the WAL. The system should retry application or replay it during recovery, and should not acknowledge the client until the required durability and application policy is satisfied. WAL operations should therefore be safe to replay and, ideally, idempotent.
 
 ## WAL Layout
@@ -41,7 +43,7 @@ When a WAL is opened:
 2. The directory is created if needed with owner-only permissions (`0700`).
 3. An exclusive, non-blocking advisory lock is acquired on `wal.lock`.
 4. Existing segment files are discovered and sorted by ID. Directories and files with invalid names are ignored.
-5. A new active segment is created with the next ID, even if the previous segment was not full.
+5. A new active segment is created with the next ID, even if the previous segment was not full, and the WAL directory is synchronized so the new directory entry is durable.
 
 Segment files use owner-only read/write permissions (`0600`) and are opened in append mode. Historical segments are tracked by path but are not kept open; only the active segment is opened for writing.
 
@@ -53,9 +55,9 @@ Closing the WAL synchronizes and closes the active segment, closes any other ope
 
 ## Recovery and Segment Rotation
 
-Recovery replays valid WAL entries in segment and entry order. The CRC allows recovery to detect incomplete or corrupted entries after a crash.
+Recovery replays closed segments in segment and entry order; the newly created active segment is excluded. A torn final record in the newest closed segment is truncated back to the last complete record. An incomplete record in an older segment, a complete record with an invalid CRC, an invalid operation, or non-increasing LSN order is treated as corruption.
 
-When the active segment reaches its configured size limit, the WAL creates a new segment with the next ID and continues appending there.
+Before a record would make the active segment exceed its configured size limit, the WAL closes that segment, creates a new segment with the next ID, synchronizes the WAL directory, and appends the record there.
 
 
 ## Interesting Decisions

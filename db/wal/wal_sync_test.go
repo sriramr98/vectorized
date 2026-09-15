@@ -10,7 +10,7 @@ import (
 func TestPeriodicSyncMakesSubLimitWritesAvailableFromTheActiveSegment(t *testing.T) {
 	walDir := t.TempDir()
 	w, err := NewWalWithOpts(walDir, WalOptions{
-		maxFileSizeMB: 1,
+		MaxFileSizeMB: 1,
 	}, nil)
 	if err != nil {
 		t.Fatal(err)

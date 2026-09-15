@@ -8,11 +8,19 @@ import (
 )
 
 type WalOptions struct {
-	maxFileSizeMB uint64 // max size of open segment File before it's rotated
+	MaxFileSizeMB uint64 // maximum segment size before rotation
+}
+
+func (w WalOptions) Validate() error {
+	if w.MaxFileSizeMB == 0 {
+		return fmt.Errorf("%w: MaxFileSizeMB must be greater than zero", ErrInvalidOptions)
+	}
+
+	return nil
 }
 
 var DefaultWalOpts = WalOptions{
-	maxFileSizeMB: 64,
+	MaxFileSizeMB: 64,
 }
 
 type WalFileName string
