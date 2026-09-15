@@ -22,6 +22,7 @@ const FILE_PREFIX = "wal_segment"
 var (
 	ErrUnknownFileName = errors.New("unknown File name")
 	ErrAlreadyClosed   = errors.New("wal already closed")
+	ErrWalUnhealthy    = errors.New("wal is unhealthy")
 )
 
 type Wal interface {
@@ -41,6 +42,7 @@ type DurableWal struct {
 	dirLocker          *utils.LockedDir
 	closed             bool
 	currentLSN         uint64
+	unhealthy          bool
 	logger             *slog.Logger
 }
 
@@ -125,6 +127,7 @@ func NewWalWithOpts(dirpath string, opts WalOptions, logger *slog.Logger) (*Dura
 		currentSegmentSize: 0,
 		latestSegmentId:    uint64(nextSegmentId),
 		logger:             logger,
+		unhealthy:          false,
 	}
 
 	var latestLSN uint64
@@ -145,11 +148,19 @@ func NewWalWithOpts(dirpath string, opts WalOptions, logger *slog.Logger) (*Dura
 }
 
 func (w *DurableWal) Write(opType OpType, data []byte) error {
+	if opType != OpDelete && opType != OpSet {
+		return ErrInvalidWalEntry
+	}
+
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	if w.closed {
 		return ErrAlreadyClosed
+	}
+
+	if w.unhealthy {
+		return ErrWalUnhealthy
 	}
 
 	w.currentLSN += 1
@@ -168,6 +179,7 @@ func (w *DurableWal) Write(opType OpType, data []byte) error {
 
 	if w.currentSegmentSize+uint64(dataLen) > utils.MBToBytes(w.opts.maxFileSizeMB) {
 		if err := w.rotateSegment(); err != nil {
+			w.unhealthy = true
 			return err
 		}
 	}
@@ -175,10 +187,15 @@ func (w *DurableWal) Write(opType OpType, data []byte) error {
 	// Segment is opened with O_APPEND, so writes always append and seek to end automatically
 	n, err := writeRecord(w.openSegment.File, buf.Bytes())
 	if err != nil {
+		// A failed write may have appended only part of the record. Do not allow
+		// another record to be appended until close and reopen repairs the tail.
+		w.unhealthy = true
 		return err
 	}
 
 	if err = w.openSegment.Sync(); err != nil {
+		// The record may be buffered by the kernel but not durable on disk.
+		w.unhealthy = true
 		return err
 	}
 
@@ -264,6 +281,10 @@ func (w *DurableWal) Replay(fn func(e WalEntry) error) (uint64, error) {
 
 	if w.closed {
 		return 0, ErrAlreadyClosed
+	}
+
+	if w.unhealthy {
+		return 0, ErrWalUnhealthy
 	}
 
 	var previousLSN uint64
