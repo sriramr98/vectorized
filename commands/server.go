@@ -53,7 +53,7 @@ func runServer(cmd *cobra.Command) error {
 	defer stop()
 
 	store := db.NewMemoryStore()
-	walStore, err := wal.NewWal(ctx, logger, serverConfig.WalDirPath)
+	walStore, err := wal.NewWal(logger, serverConfig.WalDirPath)
 	if err != nil {
 		return err
 	}

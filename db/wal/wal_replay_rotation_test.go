@@ -2,7 +2,6 @@ package wal
 
 import (
 	"bytes"
-	"context"
 	"log/slog"
 	"reflect"
 	"testing"
@@ -11,7 +10,6 @@ import (
 func TestReplayReturnsEntriesAfterSegmentRotation(t *testing.T) {
 	walDir := t.TempDir()
 	w, err := NewWalWithOpts(
-		context.Background(),
 		walDir,
 		WalOptions{maxFileSizeMB: 1},
 		slog.Default(),

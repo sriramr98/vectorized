@@ -2,7 +2,6 @@ package wal
 
 import (
 	"bytes"
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,7 +9,7 @@ import (
 
 func TestPeriodicSyncMakesSubLimitWritesAvailableFromTheActiveSegment(t *testing.T) {
 	walDir := t.TempDir()
-	w, err := NewWalWithOpts(context.TODO(), walDir, WalOptions{
+	w, err := NewWalWithOpts(walDir, WalOptions{
 		maxFileSizeMB: 1,
 	}, nil)
 	if err != nil {

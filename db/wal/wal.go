@@ -3,7 +3,6 @@ package wal
 import (
 	"bytes"
 	"cmp"
-	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -46,12 +45,12 @@ type DurableWal struct {
 }
 
 // NewWal creates a Wal with default options
-func NewWal(ctx context.Context, logger *slog.Logger, dirpath string) (*DurableWal, error) {
-	return NewWalWithOpts(ctx, dirpath, DefaultWalOpts, logger)
+func NewWal(logger *slog.Logger, dirpath string) (*DurableWal, error) {
+	return NewWalWithOpts(dirpath, DefaultWalOpts, logger)
 }
 
 // NewWalWithOpts creates a Wal with custom options
-func NewWalWithOpts(ctx context.Context, dirpath string, opts WalOptions, logger *slog.Logger) (*DurableWal, error) {
+func NewWalWithOpts(dirpath string, opts WalOptions, logger *slog.Logger) (*DurableWal, error) {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -162,28 +161,40 @@ func (w *DurableWal) Write(opType OpType, data []byte) error {
 	}
 
 	buf := bytes.NewBuffer([]byte{})
-	n, err := entry.Encode(buf)
+	dataLen, err := entry.Encode(buf)
 	if err != nil {
 		return err
 	}
 
-	if w.currentSegmentSize+uint64(n) > utils.MBToBytes(w.opts.maxFileSizeMB) {
+	if w.currentSegmentSize+uint64(dataLen) > utils.MBToBytes(w.opts.maxFileSizeMB) {
 		if err := w.rotateSegment(); err != nil {
 			return err
 		}
 	}
 
 	// Segment is opened with O_APPEND, so writes always append and seek to end automatically
-	if n, err = w.openSegment.File.Write(buf.Bytes()); err != nil {
+	n, err := writeRecord(w.openSegment.File, buf.Bytes())
+	if err != nil {
 		return err
-	} else {
-		if err := w.openSegment.Sync(); err != nil {
-			return err
-		}
-
-		w.currentSegmentSize += uint64(n)
-		return nil
 	}
+
+	if err = w.openSegment.Sync(); err != nil {
+		return err
+	}
+
+	w.currentSegmentSize += uint64(n)
+	return nil
+}
+
+func writeRecord(writer io.Writer, record []byte) (int, error) {
+	n, err := writer.Write(record)
+	if err != nil {
+		return n, err
+	}
+	if n != len(record) {
+		return n, io.ErrShortWrite
+	}
+	return n, nil
 }
 
 func (w *DurableWal) rotateSegment() error {
@@ -233,11 +244,13 @@ func (w *DurableWal) Close() error {
 	}
 	clear(w.segments)
 
-	err := w.dirLocker.Release()
-	if err != nil {
-		return err
+	if w.dirLocker != nil {
+		err := w.dirLocker.Release()
+		if err != nil {
+			return err
+		}
+		w.dirLocker = nil
 	}
-	w.dirLocker = nil
 
 	w.closed = true
 	return nil
@@ -376,7 +389,12 @@ func truncateAndSyncSegment(path string, size int64) error {
 	return file.Close()
 }
 
+// createWalFile creates a new file on disk and sync the directory metadata and returns a Segment
 func createWalFile(dirpath string, idx uint64) (*Segment, error) {
+	return createWalFileWithSync(dirpath, idx, utils.SyncDir)
+}
+
+func createWalFileWithSync(dirpath string, idx uint64, syncDir func(string) error) (*Segment, error) {
 	File_name := NewWalFileName(idx)
 	File_path := filepath.Join(dirpath, File_name)
 
@@ -384,6 +402,10 @@ func createWalFile(dirpath string, idx uint64) (*Segment, error) {
 
 	if err != nil {
 		return nil, err
+	}
+
+	if err := syncDir(dirpath); err != nil {
+		return nil, errors.Join(err, File.Close())
 	}
 
 	return NewSegment(File, File_path, idx), nil

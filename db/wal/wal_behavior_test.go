@@ -2,8 +2,8 @@ package wal
 
 import (
 	"bytes"
-	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -15,7 +15,7 @@ const testSegmentSizeMB = 1
 
 func TestWriteRotatesBeforeARecordWouldExceedTheSegmentLimit(t *testing.T) {
 	walDir := t.TempDir()
-	w, err := NewWalWithOpts(context.TODO(), walDir, WalOptions{maxFileSizeMB: testSegmentSizeMB}, nil)
+	w, err := NewWalWithOpts(walDir, WalOptions{maxFileSizeMB: testSegmentSizeMB}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -49,7 +49,7 @@ func TestWriteRotatesBeforeARecordWouldExceedTheSegmentLimit(t *testing.T) {
 
 func TestRotationPreservesRecordOrderAndDoesNotSplitRecords(t *testing.T) {
 	walDir := t.TempDir()
-	w, err := NewWalWithOpts(context.TODO(), walDir, WalOptions{maxFileSizeMB: testSegmentSizeMB}, nil)
+	w, err := NewWalWithOpts(walDir, WalOptions{maxFileSizeMB: testSegmentSizeMB}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -83,7 +83,7 @@ func TestRotationPreservesRecordOrderAndDoesNotSplitRecords(t *testing.T) {
 }
 
 func TestWriteAfterCloseIsRejected(t *testing.T) {
-	w, err := NewWalWithOpts(context.TODO(), t.TempDir(), WalOptions{}, nil)
+	w, err := NewWalWithOpts(t.TempDir(), WalOptions{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,9 +95,33 @@ func TestWriteAfterCloseIsRejected(t *testing.T) {
 	}
 }
 
+func TestCloseIsIdempotent(t *testing.T) {
+	w, err := NewWalWithOpts(t.TempDir(), DefaultWalOpts, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("first Close() error = %v", err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatalf("second Close() error = %v, want nil", err)
+	}
+}
+
+func TestWriteRecordRejectsShortWrite(t *testing.T) {
+	record := []byte("complete-record")
+	n, err := writeRecord(shortWalWriter{}, record)
+	if !errors.Is(err, io.ErrShortWrite) {
+		t.Fatalf("writeRecord() error = %v, want %v", err, io.ErrShortWrite)
+	}
+	if n != len(record)-1 {
+		t.Fatalf("writeRecord() bytes = %d, want %d", n, len(record)-1)
+	}
+}
+
 func TestWriteAssignsStrictlyIncreasingLSNs(t *testing.T) {
 	walDir := t.TempDir()
-	w, err := NewWalWithOpts(context.TODO(), walDir, DefaultWalOpts, nil)
+	w, err := NewWalWithOpts(walDir, DefaultWalOpts, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +153,7 @@ func TestWriteAssignsStrictlyIncreasingLSNs(t *testing.T) {
 
 func TestReplayReturnsEntriesInSegmentAndLSNOrder(t *testing.T) {
 	walDir := t.TempDir()
-	w, err := NewWalWithOpts(context.TODO(), walDir, WalOptions{maxFileSizeMB: testSegmentSizeMB}, nil)
+	w, err := NewWalWithOpts(walDir, WalOptions{maxFileSizeMB: testSegmentSizeMB}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +213,7 @@ func TestReplayTruncatesIncompleteFinalRecord(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			walDir := t.TempDir()
-			w, err := NewWalWithOpts(context.TODO(), walDir, DefaultWalOpts, nil)
+			w, err := NewWalWithOpts(walDir, DefaultWalOpts, nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -241,7 +265,7 @@ func TestReplayTruncatesIncompleteFinalRecord(t *testing.T) {
 
 func TestReplayRejectsIncompleteRecordBeforeFinalSegment(t *testing.T) {
 	walDir := t.TempDir()
-	w, err := NewWalWithOpts(context.TODO(), walDir, WalOptions{maxFileSizeMB: testSegmentSizeMB}, nil)
+	w, err := NewWalWithOpts(walDir, WalOptions{maxFileSizeMB: testSegmentSizeMB}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,14 +290,14 @@ func TestReplayRejectsIncompleteRecordBeforeFinalSegment(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if _, err := NewWalWithOpts(context.TODO(), walDir, WalOptions{maxFileSizeMB: testSegmentSizeMB}, nil); err == nil {
+	if _, err := NewWalWithOpts(walDir, WalOptions{maxFileSizeMB: testSegmentSizeMB}, nil); err == nil {
 		t.Fatal("NewWalWithOpts() error = nil, want incomplete non-final record error")
 	}
 }
 
 func TestNewWalRecoversTornTailInLastExistingSegment(t *testing.T) {
 	walDir := t.TempDir()
-	w, err := NewWalWithOpts(context.TODO(), walDir, DefaultWalOpts, nil)
+	w, err := NewWalWithOpts(walDir, DefaultWalOpts, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -299,7 +323,7 @@ func TestNewWalRecoversTornTailInLastExistingSegment(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reopened, err := NewWalWithOpts(context.TODO(), walDir, DefaultWalOpts, nil)
+	reopened, err := NewWalWithOpts(walDir, DefaultWalOpts, nil)
 	if err != nil {
 		t.Fatalf("NewWalWithOpts() error = %v, want torn tail recovered", err)
 	}
@@ -318,7 +342,7 @@ func TestNewWalRecoversTornTailInLastExistingSegment(t *testing.T) {
 
 func TestReplayRejectsOversizedRecordBeforeAllocatingBody(t *testing.T) {
 	walDir := t.TempDir()
-	w, err := NewWalWithOpts(context.TODO(), walDir, DefaultWalOpts, nil)
+	w, err := NewWalWithOpts(walDir, DefaultWalOpts, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -395,4 +419,10 @@ func closeWal(t *testing.T, w *DurableWal) {
 	if err := w.Close(); err != nil {
 		t.Errorf("Close() error = %v", err)
 	}
+}
+
+type shortWalWriter struct{}
+
+func (shortWalWriter) Write(p []byte) (int, error) {
+	return len(p) - 1, nil
 }

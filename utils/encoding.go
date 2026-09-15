@@ -23,14 +23,18 @@ func LengthEncodeBytes(data [][]byte, w io.Writer) error {
 		return errors.New("cannot encode empty data")
 	}
 
-	binary.Write(w, binary.BigEndian, uint64(arg_count))
+	if err := binary.Write(w, binary.BigEndian, uint64(arg_count)); err != nil {
+		return err
+	}
 
 	for _, d := range data {
 		if d == nil {
 			return errors.New("cannot encode nil byte")
 		}
 		dLen := len(d)
-		binary.Write(w, binary.BigEndian, uint64(dLen))
+		if err := binary.Write(w, binary.BigEndian, uint64(dLen)); err != nil {
+			return err
+		}
 		n, err := w.Write(d)
 		if err != nil {
 			return err

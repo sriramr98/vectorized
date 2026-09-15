@@ -55,3 +55,18 @@ func EnsureFile(fp string, flags int) (*os.File, error) {
 
 	return file, err
 }
+
+// SyncDir calls fsync on the directory's file descriptor to sync directory metadata
+func SyncDir(dirpath string) error {
+	f, err := os.Open(dirpath)
+	if err != nil {
+		return err
+	}
+
+	syncErr := f.Sync()
+	closeErr := f.Close()
+	if syncErr != nil {
+		return syncErr
+	}
+	return closeErr
+}

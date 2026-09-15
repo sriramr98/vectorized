@@ -18,12 +18,15 @@ type Engine struct {
 	store    db.MemStore
 	walStore wal.Wal
 	mu       sync.RWMutex
+	// reuse writeBuf during Set to reduce new buffer allocations
+	writeBuf *bytes.Buffer
 }
 
 func NewEngine(store db.MemStore, walStore wal.Wal) *Engine {
 	return &Engine{
 		store:    store,
 		walStore: walStore,
+		writeBuf: bytes.NewBuffer([]byte{}),
 	}
 }
 
@@ -32,19 +35,20 @@ func (e *Engine) Set(key []byte, value []byte) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
+	e.writeBuf.Reset()
+
+	if err := utils.LengthEncodeBytes([][]byte{key, value}, e.writeBuf); err != nil {
+		return err
+	}
+
+	if err := e.walStore.Write(wal.OpSet, e.writeBuf.Bytes()); err != nil {
+		return err
+	}
+
 	if err := e.store.Set(key, value); err != nil {
-		return err
-	}
-
-	buf := bytes.NewBuffer([]byte{})
-
-	if err := utils.LengthEncodeBytes([][]byte{key, value}, buf); err != nil {
-		return err
-	}
-
-	if err := e.walStore.Write(wal.OpSet, buf.Bytes()); err != nil {
-		e.store.Delete(key)
-		return err
+		// wal record is written by this time. Wal is immutable, so the write is technically written.
+		// but since it's not commited, future reads fail. This makes the db in an inconsistent state just for this key
+		return fmt.Errorf("unable to set key %s but commited to wal", key)
 	}
 
 	return nil
@@ -68,7 +72,7 @@ func (e *Engine) Delete(key []byte) (deleted bool, err error) {
 
 	_, found := e.store.Get(key)
 	if !found {
-		return false, ErrKeyNotFound
+		return false, nil
 	}
 
 	buf := bytes.NewBuffer([]byte{})
@@ -88,7 +92,7 @@ func (e *Engine) Delete(key []byte) (deleted bool, err error) {
 // Recover wipes the store and re-creates the store from walStore
 // returns the number of wal records processed and error if any
 func (e *Engine) Recover() (uint64, error) {
-	e.store.Clear()
+	newStore := db.NewMemoryStore()
 
 	count, err := e.walStore.Replay(func(we wal.WalEntry) error {
 		switch we.OpType {
@@ -98,14 +102,14 @@ func (e *Engine) Recover() (uint64, error) {
 				return err
 			}
 
-			if len(res) < 2 {
-				return fmt.Errorf("set expects atleast two arguments but got %d", len(res))
+			if len(res) != 2 {
+				return fmt.Errorf("set expects two arguments but got %d", len(res))
 			}
 
 			key := res[0]
 			value := res[1]
 
-			return e.store.Set(key, value)
+			return newStore.Set(key, value)
 
 		case wal.OpDelete:
 			res, err := utils.DecodeLengthEncodedBytes(we.Data)
@@ -117,12 +121,17 @@ func (e *Engine) Recover() (uint64, error) {
 				return fmt.Errorf("delete expects exactly one argument but got %d", len(res))
 			}
 
-			e.store.Delete(res[0])
+			newStore.Delete(res[0])
 			return nil
 		default:
 			return fmt.Errorf("unknown op type in wal %d", we.OpType)
 		}
 	})
+
+	if err == nil {
+		e.store.Clear()
+		e.store = newStore
+	}
 
 	return count, err
 }

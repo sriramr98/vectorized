@@ -97,6 +97,27 @@ func TestLengthEncodeBytesReturnsHeaderWriteError(t *testing.T) {
 	}
 }
 
+func TestLengthEncodeBytesReturnsEachHeaderWriteError(t *testing.T) {
+	wantErr := errors.New("header write failed")
+	tests := []struct {
+		name        string
+		failedWrite int
+	}{
+		{"argument count", 1},
+		{"argument length", 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			writer := &failSpecificWriteWriter{failedWrite: tt.failedWrite, err: wantErr}
+			err := LengthEncodeBytes([][]byte{[]byte("value")}, writer)
+			if !errors.Is(err, wantErr) {
+				t.Fatalf("LengthEncodeBytes() error = %v, want %v", err, wantErr)
+			}
+		})
+	}
+}
+
 func TestLengthEncodeBytesReturnsPayloadWriteFailures(t *testing.T) {
 	writeErr := errors.New("payload write failed")
 	tests := []struct {
@@ -194,6 +215,20 @@ func (w shortFirstWriteWriter) Write(p []byte) (int, error) {
 type failAfterWritesWriter struct {
 	remainingSuccessfulWrites int
 	err                       error
+}
+
+type failSpecificWriteWriter struct {
+	writes      int
+	failedWrite int
+	err         error
+}
+
+func (w *failSpecificWriteWriter) Write(p []byte) (int, error) {
+	w.writes++
+	if w.writes == w.failedWrite {
+		return 0, w.err
+	}
+	return len(p), nil
 }
 
 func (w *failAfterWritesWriter) Write(p []byte) (int, error) {
