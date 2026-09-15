@@ -41,7 +41,7 @@ func TestNewWalCreatesDirectoryAndFirstSegment(t *testing.T) {
 	}
 }
 
-func TestNewWalDiscoversOnlyValidSegmentsAndAllocatesNextIndex(t *testing.T) {
+func TestNewWalDiscoversOnlyValidSegmentsAndReusesLatestWithSpace(t *testing.T) {
 	walDir := t.TempDir()
 	for _, name := range []string{
 		NewWalFileName(9),
@@ -74,18 +74,24 @@ func TestNewWalDiscoversOnlyValidSegmentsAndAllocatesNextIndex(t *testing.T) {
 	gotIndexes := make([]uint64, len(w.segments))
 	for i, segment := range w.segments {
 		gotIndexes[i] = segment.idx
-		if segment.File != nil {
+		if segment.idx != 10 && segment.File != nil {
 			t.Fatalf("closed segment %d has an open file", segment.idx)
 		}
 	}
 	if want := []uint64{0, 3, 9, 10}; slices.Compare(gotIndexes, want) != 0 {
 		t.Fatalf("discovered segment indexes = %v, want %v", gotIndexes, want)
 	}
-	if w.openSegment.idx != 11 {
-		t.Fatalf("open segment index = %d, want 11", w.openSegment.idx)
+	if w.openSegment.idx != 10 {
+		t.Fatalf("open segment index = %d, want reused segment 10", w.openSegment.idx)
 	}
-	if _, err := os.Stat(filepath.Join(walDir, NewWalFileName(11))); err != nil {
-		t.Fatalf("stat next segment: %v", err)
+	if w.openSegment != w.segments[len(w.segments)-1] {
+		t.Fatal("active segment does not reference the discovered latest segment")
+	}
+	if w.openSegment.File == nil {
+		t.Fatal("reused active segment does not have an open file")
+	}
+	if _, err := os.Stat(filepath.Join(walDir, NewWalFileName(11))); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("stat unused next segment error = %v, want %v", err, os.ErrNotExist)
 	}
 }
 

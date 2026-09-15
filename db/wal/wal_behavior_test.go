@@ -83,6 +83,155 @@ func TestRotationPreservesRecordOrderAndDoesNotSplitRecords(t *testing.T) {
 	}
 }
 
+func TestRestartReusesLatestSegmentAndAppendsWithoutOverwriting(t *testing.T) {
+	walDir := t.TempDir()
+	w, err := NewWalWithOpts(walDir, WalOptions{MaxFileSizeMB: testSegmentSizeMB}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Write(OpSet, []byte("before restart")); err != nil {
+		t.Fatal(err)
+	}
+	closeWal(t, w)
+
+	reopened, err := NewWalWithOpts(walDir, WalOptions{MaxFileSizeMB: testSegmentSizeMB}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeWal(t, reopened)
+
+	if got := reopened.openSegment.idx; got != 1 {
+		t.Fatalf("active segment = %d, want reused segment 1", got)
+	}
+	wantInitialSize := uint64(walEntryHeaderSize + len("before restart"))
+	if got := reopened.currentSegmentSize; got != wantInitialSize {
+		t.Fatalf("active segment size = %d, want recovered size %d", got, wantInitialSize)
+	}
+	if err := reopened.Write(OpDelete, []byte("after restart")); err != nil {
+		t.Fatal(err)
+	}
+
+	paths := walSegmentPaths(t, walDir)
+	if len(paths) != 1 {
+		t.Fatalf("segment count = %d, want 1 reused segment", len(paths))
+	}
+	entries := readSegmentEntries(t, paths[0])
+	if len(entries) != 2 {
+		t.Fatalf("reused segment entry count = %d, want 2", len(entries))
+	}
+	if entries[0].LSN != 1 || string(entries[0].Data) != "before restart" ||
+		entries[1].LSN != 2 || string(entries[1].Data) != "after restart" {
+		t.Fatalf("reused segment entries = %+v, want ordered pre- and post-restart records", entries)
+	}
+}
+
+func TestReusedSegmentAccountsForExistingBytesWhenRotating(t *testing.T) {
+	walDir := t.TempDir()
+	w, err := NewWalWithOpts(walDir, WalOptions{MaxFileSizeMB: testSegmentSizeMB}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := bytes.Repeat([]byte("a"), 700*1024)
+	if err := w.Write(OpSet, first); err != nil {
+		t.Fatal(err)
+	}
+	closeWal(t, w)
+
+	reopened, err := NewWalWithOpts(walDir, WalOptions{MaxFileSizeMB: testSegmentSizeMB}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeWal(t, reopened)
+	second := bytes.Repeat([]byte("b"), 700*1024)
+	if err := reopened.Write(OpSet, second); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := reopened.openSegment.idx; got != 2 {
+		t.Fatalf("active segment = %d, want 2 after accounting for bytes already in segment 1", got)
+	}
+	if got := len(reopened.segments); got != 1 {
+		t.Fatalf("closed segment count = %d, want 1 without duplicating the reused segment", got)
+	}
+	if entries := readSegmentEntries(t, filepath.Join(walDir, NewWalFileName(1))); len(entries) != 1 || !bytes.Equal(entries[0].Data, first) {
+		t.Fatalf("segment 1 does not contain exactly the pre-restart record")
+	}
+	if entries := readSegmentEntries(t, filepath.Join(walDir, NewWalFileName(2))); len(entries) != 1 || !bytes.Equal(entries[0].Data, second) {
+		t.Fatalf("segment 2 does not contain exactly the post-restart record")
+	}
+}
+
+func TestReplayUsesRecoveredPrefixUntilReusedSegmentCloses(t *testing.T) {
+	walDir := t.TempDir()
+	w, err := NewWalWithOpts(walDir, WalOptions{MaxFileSizeMB: testSegmentSizeMB}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Write(OpSet, []byte("recovered")); err != nil {
+		t.Fatal(err)
+	}
+	closeWal(t, w)
+
+	reopened, err := NewWalWithOpts(walDir, WalOptions{MaxFileSizeMB: testSegmentSizeMB}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeWal(t, reopened)
+	if err := reopened.Write(OpSet, bytes.Repeat([]byte("a"), 700*1024)); err != nil {
+		t.Fatal(err)
+	}
+
+	var got []uint64
+	if _, err := reopened.Replay(func(entry WalEntry) error {
+		got = append(got, entry.LSN)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, []uint64{1}) {
+		t.Fatalf("replay while reused segment is active returned LSNs %v, want recovered prefix [1]", got)
+	}
+
+	if err := reopened.Write(OpDelete, bytes.Repeat([]byte("b"), 700*1024)); err != nil {
+		t.Fatal(err)
+	}
+	got = nil
+	if _, err := reopened.Replay(func(entry WalEntry) error {
+		got = append(got, entry.LSN)
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, []uint64{1, 2}) {
+		t.Fatalf("replay after reused segment closed returned LSNs %v, want [1 2] exactly once", got)
+	}
+}
+
+func TestRestartCreatesNextSegmentWhenLatestIsFull(t *testing.T) {
+	walDir := t.TempDir()
+	w, err := NewWalWithOpts(walDir, WalOptions{MaxFileSizeMB: testSegmentSizeMB}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := bytes.Repeat([]byte("x"), (1<<20)-walEntryHeaderSize)
+	if err := w.Write(OpSet, data); err != nil {
+		t.Fatal(err)
+	}
+	closeWal(t, w)
+
+	reopened, err := NewWalWithOpts(walDir, WalOptions{MaxFileSizeMB: testSegmentSizeMB}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeWal(t, reopened)
+	if got := reopened.openSegment.idx; got != 2 {
+		t.Fatalf("active segment = %d, want new segment 2 after full segment 1", got)
+	}
+	if got := reopened.currentSegmentSize; got != 0 {
+		t.Fatalf("new active segment size = %d, want 0", got)
+	}
+}
+
 func TestWriteAfterCloseIsRejected(t *testing.T) {
 	w, err := NewWalWithOpts(t.TempDir(), DefaultWalOpts, nil)
 	if err != nil {

@@ -43,11 +43,11 @@ When a WAL is opened:
 2. The directory is created if needed with owner-only permissions (`0700`).
 3. An exclusive, non-blocking advisory lock is acquired on `wal.lock`.
 4. Existing segment files are discovered and sorted by ID. Directories and files with invalid names are ignored.
-5. A new active segment is created with the next ID, even if the previous segment was not full, and the WAL directory is synchronized so the new directory entry is durable.
+5. If the latest segment is below the configured size limit, it is reopened in append mode and reused. Otherwise, a new active segment is created with the next ID and the WAL directory is synchronized so the new directory entry is durable.
 
 Segment files use owner-only read/write permissions (`0600`) and are opened in append mode. Historical segments are tracked by path but are not kept open; only the active segment is opened for writing.
 
-An empty WAL starts with `wal_segment__1`. The next active segment is always `max(existing segment ID) + 1`.
+An empty WAL starts with `wal_segment__1`. A new segment uses `max(existing segment ID) + 1`; a reusable latest segment retains its existing ID and byte-size accounting.
 
 ## WAL Shutdown
 
@@ -55,7 +55,7 @@ Closing the WAL synchronizes and closes the active segment, closes any other ope
 
 ## Recovery and Segment Rotation
 
-Recovery replays closed segments in segment and entry order; the newly created active segment is excluded. A torn final record in the newest closed segment is truncated back to the last complete record. An incomplete record in an older segment, a complete record with an invalid CRC, an invalid operation, or non-increasing LSN order is treated as corruption.
+Recovery replays segments and entries present at startup in order. If the latest segment is reused, replay exposes only its recovered prefix while it remains active; records appended after startup become replayable once rotation closes the segment. A newly created active segment is excluded. A torn final record in the latest recovered segment is truncated back to the last complete record. An incomplete record in an older segment, a complete record with an invalid CRC, an invalid operation, or non-increasing LSN order is treated as corruption.
 
 Before a record would make the active segment exceed its configured size limit, the WAL closes that segment, creates a new segment with the next ID, synchronizes the WAL directory, and appends the record there.
 

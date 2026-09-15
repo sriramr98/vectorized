@@ -39,7 +39,6 @@ type DurableWal struct {
 	segments           []*Segment
 	openSegment        *Segment
 	currentSegmentSize uint64
-	latestSegmentId    uint64
 	dirLocker          *utils.LockedDir
 	closed             bool
 	currentLSN         uint64
@@ -112,26 +111,25 @@ func NewWalWithOpts(dirpath string, opts WalOptions, logger *slog.Logger) (*Dura
 		return cmp.Compare(a.idx, b.idx)
 	})
 
-	// we always create a new File for open segment even if previous File wasn't used to it's full capacity
-	nextSegmentId := lastMaxId + 1
-	openSegment, err := createWalFile(dirpath, nextSegmentId)
+	var openSegment *Segment
+
+	if len(segments) > 0 {
+		openSegment, err = lastOrNewSegment(segments[len(segments)-1], opts, dirpath)
+	} else {
+		openSegment, err = createWalFile(dirpath, lastMaxId+1)
+	}
 	if err != nil {
-		if err := locker.Release(); err != nil {
-			return nil, err
-		}
-		return nil, err
+		return nil, errors.Join(err, locker.Release())
 	}
 
 	w := &DurableWal{
-		mu:          sync.Mutex{},
-		dirpath:     dirpath,
-		opts:        opts,
-		segments:    segments,
-		openSegment: openSegment,
-		dirLocker:   locker,
-		// every new wal initialization always creates a new segment for future writes which makes this simpler
+		mu:                 sync.Mutex{},
+		dirpath:            dirpath,
+		opts:               opts,
+		segments:           segments,
+		openSegment:        openSegment,
+		dirLocker:          locker,
 		currentSegmentSize: 0,
-		latestSegmentId:    uint64(nextSegmentId),
 		logger:             logger,
 		unhealthy:          false,
 	}
@@ -149,6 +147,13 @@ func NewWalWithOpts(dirpath string, opts WalOptions, logger *slog.Logger) (*Dura
 		return nil, fmt.Errorf("recover WAL LSN: %w", err)
 	}
 	w.currentLSN = latestLSN
+
+	openSegmentInfo, err := w.openSegment.Stat()
+	if err != nil {
+		_ = w.Close()
+		return nil, fmt.Errorf("stat active WAL segment %q: %w", w.openSegment.path, err)
+	}
+	w.currentSegmentSize = uint64(openSegmentInfo.Size())
 
 	return w, nil
 }
@@ -222,16 +227,23 @@ func writeRecord(writer io.Writer, record []byte) (int, error) {
 
 func (w *DurableWal) rotateSegment() error {
 	w.logger.Debug("rotating segment")
+	openSegmentAlreadyTracked := len(w.segments) > 0 && w.segments[len(w.segments)-1] == w.openSegment
+
 	// Segment.Close will flush any in-memory changes to disk
 	if err := w.openSegment.Close(); err != nil {
 		return err
 	}
 
-	w.segments = append(w.segments, w.openSegment)
+	if openSegmentAlreadyTracked {
+		// While a recovered segment is active, its cache represents only the
+		// immutable prefix present at startup. Once the segment is closed, replay
+		// must read it again so records appended in this process are included.
+		w.openSegment.entryCache = nil
+	} else {
+		w.segments = append(w.segments, w.openSegment)
+	}
 
-	w.latestSegmentId = w.latestSegmentId + 1
-
-	newSegment, err := createWalFile(w.dirpath, w.latestSegmentId)
+	newSegment, err := createWalFile(w.dirpath, w.openSegment.idx+1)
 	if err != nil {
 		return err
 	}
@@ -435,4 +447,29 @@ func createWalFileWithSync(dirpath string, idx uint64, syncDir func(string) erro
 	}
 
 	return NewSegment(File, File_path, idx), nil
+}
+
+// if the input segment is still not full, return it else create new wal segment
+func lastOrNewSegment(segment *Segment, opts WalOptions, dirpath string) (*Segment, error) {
+	if segment == nil {
+		return segment, errors.New("invalid segment")
+	}
+
+	stat, err := os.Stat(segment.path)
+	if err != nil {
+		return nil, err
+	}
+
+	// Write performs the exact record-size check and rotates if the remaining
+	// space is too small for the next record.
+	if stat.Size() < int64(utils.MBToBytes(opts.MaxFileSizeMB)) {
+		file, err := os.OpenFile(segment.path, os.O_RDWR|os.O_APPEND, utils.PermFileReadWriteOwnerOnly)
+		if err != nil {
+			return nil, err
+		}
+		segment.File = file
+		return segment, nil
+	}
+
+	return createWalFile(dirpath, segment.idx+1)
 }
