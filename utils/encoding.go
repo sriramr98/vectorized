@@ -9,6 +9,11 @@ import (
 
 var ErrUnableToWriteCompleteData error = errors.New("unable to write data completely")
 
+const (
+	maxLengthEncodedArguments    = 1_024
+	maxLengthEncodedArgumentSize = 64 << 20
+)
+
 // takes a slice of bytes where every element is a data to be length encoded into the final data
 func LengthEncodeBytes(data [][]byte, w io.Writer) error {
 	//<len_args><len><bytes><len><bytes><len3><bytes>
@@ -49,6 +54,14 @@ func DecodeLengthEncodedBytes(data []byte) ([][]byte, error) {
 	}
 
 	argCount := binary.BigEndian.Uint64(data[:lengthSize])
+	if argCount > maxLengthEncodedArguments {
+		return nil, fmt.Errorf("encoded arguments: count %d exceeds maximum %d", argCount, maxLengthEncodedArguments)
+	}
+	// Even zero-length arguments require an eight-byte length field. Reject an
+	// impossible count before using it as a slice capacity.
+	if argCount > uint64((len(data)-lengthSize)/lengthSize) {
+		return nil, fmt.Errorf("encoded arguments: count %d exceeds available length fields", argCount)
+	}
 	offset := lengthSize
 	args := make([][]byte, 0, argCount)
 
@@ -59,6 +72,9 @@ func DecodeLengthEncodedBytes(data []byte) ([][]byte, error) {
 
 		argLen := uint64(binary.BigEndian.Uint64(data[offset : offset+lengthSize]))
 		offset += lengthSize
+		if argLen > maxLengthEncodedArgumentSize {
+			return nil, fmt.Errorf("encoded argument %d: length %d exceeds maximum %d", i, argLen, maxLengthEncodedArgumentSize)
+		}
 		if argLen > uint64(len(data)-offset) {
 			return nil, fmt.Errorf("encoded argument %d: length %d exceeds remaining data", i, argLen)
 		}

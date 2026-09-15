@@ -139,6 +139,25 @@ func TestDecodeLengthEncodedBytesRejectsMalformedInput(t *testing.T) {
 	}
 }
 
+func TestDecodeLengthEncodedBytesRejectsAllocationBounds(t *testing.T) {
+	tests := []struct {
+		name string
+		data []byte
+	}{
+		{"excessive argument count", uint64s(maxLengthEncodedArguments + 1)},
+		{"count exceeds available length fields", uint64s(2, 0)},
+		{"oversized argument", uint64s(1, maxLengthEncodedArgumentSize+1)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if _, err := DecodeLengthEncodedBytes(tt.data); err == nil {
+				t.Fatal("DecodeLengthEncodedBytes() error = nil, want allocation-bound error")
+			}
+		})
+	}
+}
+
 func TestDecodeLengthEncodedBytesReturnsIndependentArguments(t *testing.T) {
 	encoded := append(uint64s(1, 3), 'k', 'e', 'y')
 	got, err := DecodeLengthEncodedBytes(encoded)

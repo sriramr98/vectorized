@@ -20,11 +20,16 @@ const (
 	walEntryVersionV1 OpType = 1
 	// checksum + version + LSN + operation + data length
 	walEntryHeaderSize = 4 + 1 + 8 + 1 + 4
+	// MaxWalRecordDataBytes bounds allocations made from an on-disk length. It
+	// accommodates the largest current SET payload: two 64 MiB RESP arguments
+	// plus the argument-count and two argument-length fields.
+	MaxWalRecordDataBytes = 2*(64<<20) + 3*8
 )
 
 var (
 	ErrInvalidWalEntry       = errors.New("invalid wal entry")
 	ErrUnsupportedWalVersion = errors.New("unsupported wal entry version")
+	ErrWalRecordTooLarge     = errors.New("wal record data exceeds maximum size")
 )
 
 // WalEntryV1 is the first version of the WAL entry format.
@@ -42,6 +47,9 @@ type WalEntry = WalEntryV1
 func (we WalEntryV1) Encode(buf *bytes.Buffer) (int, error) {
 	if buf == nil {
 		return -1, errors.New("wal entry: nil buffer")
+	}
+	if len(we.Data) > MaxWalRecordDataBytes {
+		return -1, fmt.Errorf("%w: %d bytes", ErrWalRecordTooLarge, len(we.Data))
 	}
 
 	start := buf.Len()
@@ -107,6 +115,11 @@ func DecodeWalEntryV1(data []byte) (WalEntryV1, error) {
 		return WalEntryV1{}, fmt.Errorf("%w: record is too short", ErrInvalidWalEntry)
 	}
 
+	dataLen := binary.BigEndian.Uint32(data[14:18])
+	if dataLen > MaxWalRecordDataBytes {
+		return WalEntryV1{}, fmt.Errorf("%w: %d bytes", ErrWalRecordTooLarge, dataLen)
+	}
+
 	storedChecksum := binary.BigEndian.Uint32(data[:4])
 	calculatedChecksum := crc32.ChecksumIEEE(data[4:])
 	if storedChecksum != calculatedChecksum {
@@ -117,7 +130,6 @@ func DecodeWalEntryV1(data []byte) (WalEntryV1, error) {
 		return WalEntryV1{}, fmt.Errorf("%w: %d", ErrUnsupportedWalVersion, data[4])
 	}
 
-	dataLen := binary.BigEndian.Uint32(data[14:18])
 	expectedLen := uint64(walEntryHeaderSize) + uint64(dataLen)
 	if expectedLen != uint64(len(data)) {
 		return WalEntryV1{}, fmt.Errorf("%w: data length does not match record length", ErrInvalidWalEntry)
