@@ -40,11 +40,17 @@ func TestReplayReturnsEntriesAfterSegmentRotation(t *testing.T) {
 	}
 
 	var got []WalEntry
-	if err := w.Replay(func(entry WalEntry) error {
+	n, err := w.Replay(func(entry WalEntry) error {
 		got = append(got, entry)
 		return nil
-	}); err != nil {
+	})
+
+	if err != nil {
 		t.Fatalf("Replay() error = %v", err)
+	}
+
+	if n != uint64(len(want)) {
+		t.Fatalf("expected %d records to be replayed but got %d", len(want), n)
 	}
 
 	if !reflect.DeepEqual(got, want) {

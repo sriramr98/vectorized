@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sriramr98/vectorized/core"
 	"github.com/sriramr98/vectorized/db"
 	"github.com/sriramr98/vectorized/db/wal"
 	"github.com/sriramr98/vectorized/handlers"
@@ -18,7 +19,7 @@ func TestPublicTCPHandlerRespondsToPingAndUnknownCommands(t *testing.T) {
 
 	handlerDone := make(chan error, 1)
 	go func() {
-		handlerDone <- handlers.NewPublicTCPHandler(db.NewMemoryStore(), wal.NewInMemWal(), nil).ServeConn(context.Background(), serverConn)
+		handlerDone <- handlers.NewPublicTCPHandler(newTestEngine(), nil).ServeConn(context.Background(), serverConn)
 		_ = serverConn.Close()
 	}()
 
@@ -44,7 +45,7 @@ func TestPublicTCPHandlerReportsMalformedRequests(t *testing.T) {
 
 	handlerDone := make(chan error, 1)
 	go func() {
-		handlerDone <- handlers.NewPublicTCPHandler(db.NewMemoryStore(), wal.NewInMemWal(), nil).ServeConn(context.Background(), serverConn)
+		handlerDone <- handlers.NewPublicTCPHandler(newTestEngine(), nil).ServeConn(context.Background(), serverConn)
 		_ = serverConn.Close()
 	}()
 
@@ -72,7 +73,7 @@ func TestPublicTCPHandlerStoresValues(t *testing.T) {
 
 	handlerDone := make(chan error, 1)
 	go func() {
-		handlerDone <- handlers.NewPublicTCPHandler(db.NewMemoryStore(), wal.NewInMemWal(), nil).ServeConn(context.Background(), serverConn)
+		handlerDone <- handlers.NewPublicTCPHandler(newTestEngine(), nil).ServeConn(context.Background(), serverConn)
 		_ = serverConn.Close()
 	}()
 
@@ -111,4 +112,8 @@ func assertRequestResponse(t *testing.T, conn net.Conn, request, response string
 	if got := string(buffer); got != response {
 		t.Fatalf("response = %q, want %q", got, response)
 	}
+}
+
+func newTestEngine() *core.Engine {
+	return core.NewEngine(db.NewMemoryStore(), wal.NewInMemWal())
 }

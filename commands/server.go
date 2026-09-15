@@ -59,16 +59,21 @@ func runServer(cmd *cobra.Command) error {
 	}
 	defer walStore.Close()
 
-	if err := core.ReplayWal(walStore, store); err != nil {
+	engine := core.NewEngine(store, walStore)
+	count, err := engine.Recover()
+	if err != nil {
+		logger.Error("unable to recover store from wal", "error", err)
 		return err
 	}
+	logger.Info("wal restore completed", "processed_records", count)
 
 	listener, err := net.Listen("tcp", listenAddress)
 	if err != nil {
 		logger.Error("listen failed", "address", listenAddress, "error", err)
 		return err
 	}
-	server := tcpserver.New(listener, handlers.NewPublicTCPHandler(store, walStore, logger), logger)
+
+	server := tcpserver.New(listener, handlers.NewPublicTCPHandler(engine, logger), logger)
 	logger.Info("server listening", "address", listener.Addr())
 	if err := server.Serve(ctx); err != nil && !errors.Is(err, context.Canceled) {
 		logger.Error("server stopped unexpectedly", "error", err)

@@ -24,25 +24,32 @@ func (s *MemoryStore) Set(key, value []byte) error {
 }
 
 // Get returns a copy of the value stored under key.
-func (s *MemoryStore) Get(key []byte) ([]byte, bool, error) {
+func (s *MemoryStore) Get(key []byte) ([]byte, bool) {
 	s.mu.RLock()
 	value, found := s.values[string(key)]
 	s.mu.RUnlock()
 	if !found {
-		return nil, false, nil
+		return nil, false
 	}
-	return clone(value), true, nil
+	return clone(value), true
 }
 
 // Delete removes key and reports whether it existed.
-func (s *MemoryStore) Delete(key []byte) (bool, error) {
+func (s *MemoryStore) Delete(key []byte) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, found := s.values[string(key)]; !found {
-		return false, nil
+		return false
 	}
 	delete(s.values, string(key))
-	return true, nil
+	return true
+}
+
+func (s *MemoryStore) Clear() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	clear(s.values)
 }
 
 func clone(value []byte) []byte {

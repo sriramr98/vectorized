@@ -26,8 +26,9 @@ var (
 )
 
 type Wal interface {
-	Replay(func(WalEntry) error) error
+	Replay(func(WalEntry) error) (uint64, error)
 	Write(op OpType, data []byte) error
+	Close() error
 }
 
 type DurableWal struct {
@@ -128,14 +129,15 @@ func NewWalWithOpts(ctx context.Context, dirpath string, opts WalOptions, logger
 	}
 
 	var latestLSN uint64
-	if err := w.Replay(func(e WalEntry) error {
+	_, err = w.Replay(func(e WalEntry) error {
 		if e.LSN <= latestLSN {
 			return fmt.Errorf("WAL LSN %d is not greater than previous LSN %d", e.LSN, latestLSN)
 		}
 		latestLSN = e.LSN
 		return nil
-	}); err != nil {
-		_ = w.Close()
+	})
+	if err != nil {
+		w.Close()
 		return nil, fmt.Errorf("recover WAL LSN: %w", err)
 	}
 	w.currentLSN = latestLSN
@@ -243,15 +245,16 @@ func (w *DurableWal) Close() error {
 
 // Replay reads all existing segment files, including the active segment, and
 // emits entries in segment and LSN order.
-func (w *DurableWal) Replay(fn func(e WalEntry) error) error {
+func (w *DurableWal) Replay(fn func(e WalEntry) error) (uint64, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
 	if w.closed {
-		return ErrAlreadyClosed
+		return 0, ErrAlreadyClosed
 	}
 
 	var previousLSN uint64
+	var logCount uint64
 
 	segments := append(slices.Clone(w.segments), w.openSegment)
 	for _, segment := range segments {
@@ -262,8 +265,9 @@ func (w *DurableWal) Replay(fn func(e WalEntry) error) error {
 		if len(segment.entryCache) > 0 {
 			for _, entry := range segment.entryCache {
 				previousLSN = entry.LSN
+				logCount += 1
 				if err := fn(entry); err != nil {
-					return err
+					return 0, err
 				}
 			}
 			continue
@@ -271,7 +275,7 @@ func (w *DurableWal) Replay(fn func(e WalEntry) error) error {
 
 		file, err := os.Open(segment.path)
 		if err != nil {
-			return fmt.Errorf("open WAL segment %q: %w", segment.path, err)
+			return 0, fmt.Errorf("open WAL segment %q: %w", segment.path, err)
 		}
 
 		err = replaySegment(file, func(entry WalEntry) error {
@@ -281,18 +285,19 @@ func (w *DurableWal) Replay(fn func(e WalEntry) error) error {
 
 			segment.entryCache = append(segment.entryCache, entry)
 			previousLSN = entry.LSN
+			logCount += 1
 			return fn(entry)
 		})
 		closeErr := file.Close()
 		if err != nil {
-			return fmt.Errorf("replay WAL segment %q: %w", segment.path, err)
+			return 0, fmt.Errorf("replay WAL segment %q: %w", segment.path, err)
 		}
 		if closeErr != nil {
-			return fmt.Errorf("close WAL segment %q: %w", segment.path, closeErr)
+			return 0, fmt.Errorf("close WAL segment %q: %w", segment.path, closeErr)
 		}
 	}
 
-	return nil
+	return logCount, nil
 }
 
 func replaySegment(r io.Reader, fn func(WalEntry) error) error {

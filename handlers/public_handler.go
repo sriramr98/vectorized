@@ -9,25 +9,23 @@ import (
 	"log/slog"
 	"net"
 
-	"github.com/sriramr98/vectorized/db"
-	"github.com/sriramr98/vectorized/db/wal"
+	"github.com/sriramr98/vectorized/core"
 	"github.com/sriramr98/vectorized/protocol/command"
 	"github.com/sriramr98/vectorized/protocol/resp"
 )
 
 // PublicTCPHandler serves the RESP protocol over a public client connection.
 type PublicTCPHandler struct {
-	store  db.Store
-	wal    wal.Wal
+	engine *core.Engine
 	logger *slog.Logger
 }
 
 // NewPublicTCPHandler creates a public protocol handler backed by store.
-func NewPublicTCPHandler(store db.Store, wal wal.Wal, logger *slog.Logger) *PublicTCPHandler {
+func NewPublicTCPHandler(engine *core.Engine, logger *slog.Logger) *PublicTCPHandler {
 	if logger == nil {
 		logger = &slog.Logger{}
 	}
-	return &PublicTCPHandler{store: store, wal: wal, logger: logger}
+	return &PublicTCPHandler{logger: logger, engine: engine}
 }
 
 // ServeConn implements tcpserver.Handler.
@@ -36,7 +34,7 @@ func (h *PublicTCPHandler) ServeConn(ctx context.Context, conn net.Conn) error {
 	writer := bufio.NewWriter(conn)
 
 	for {
-		request, err := resp.ReadRequest(reader)
+		parsed_req, err := resp.Parse(reader)
 		if err != nil {
 			if errors.Is(err, io.EOF) || ctx.Err() != nil {
 				return nil
@@ -50,7 +48,7 @@ func (h *PublicTCPHandler) ServeConn(ctx context.Context, conn net.Conn) error {
 			return fmt.Errorf("read command: %w", err)
 		}
 
-		parsedCommand, err := command.Decode(request)
+		request, err := command.Decode(parsed_req)
 		if err != nil {
 			if writeErr := resp.WriteError(writer, "ERR "+err.Error()); writeErr != nil {
 				return writeErr
@@ -60,7 +58,7 @@ func (h *PublicTCPHandler) ServeConn(ctx context.Context, conn net.Conn) error {
 			}
 			continue
 		}
-		if err := h.handleCommand(writer, parsedCommand); err != nil {
+		if err := h.handleCommand(writer, request); err != nil {
 			return err
 		}
 		if err := writer.Flush(); err != nil {
@@ -69,45 +67,36 @@ func (h *PublicTCPHandler) ServeConn(ctx context.Context, conn net.Conn) error {
 	}
 }
 
-func (h *PublicTCPHandler) handleCommand(writer *bufio.Writer, parsed command.Command) error {
-
-	if parsed.WalOpType() != wal.NoOp {
-		encdedArg := parsed.LengthEncodedArgs()
-		if err := h.wal.Write(parsed.WalOpType(), encdedArg); err != nil {
-			h.logger.Error("unable to write op to wal", "error", err)
-			return resp.WriteError(writer, "ERR internal server error")
+func (h *PublicTCPHandler) handleCommand(w *bufio.Writer, req command.Request) error {
+	switch req.Op {
+	case command.OpPing:
+		return resp.WriteSimpleString(w, "PONG")
+	case command.OpSet:
+		if err := h.engine.Set(req.Args[0], req.Args[1]); err != nil {
+			return resp.WriteError(w, "ERR internal server error")
 		}
-	}
-
-	switch operation := parsed.(type) {
-	case command.Ping:
-		return resp.WriteSimpleString(writer, "PONG")
-	case command.Set:
-		if err := h.store.Set(operation.Key, operation.Value); err != nil {
-			return resp.WriteError(writer, "ERR internal server error")
-		}
-		return resp.WriteSimpleString(writer, "OK")
-	case command.Get:
-		value, found, err := h.store.Get(operation.Key)
+		return resp.WriteSimpleString(w, "OK")
+	case command.OpGet:
+		value, err := h.engine.Get(req.Args[0])
 		if err != nil {
-			return resp.WriteError(writer, "ERR internal server error")
+			if errors.Is(err, core.ErrKeyNotFound) {
+				return resp.WriteBulkString(w, nil)
+			}
+			return resp.WriteError(w, "ERR internal server error")
 		}
-		if !found {
-			return resp.WriteBulkString(writer, nil)
-		}
-		return resp.WriteBulkString(writer, value)
-	case command.Delete:
-		deleted, err := h.store.Delete(operation.Key)
+		return resp.WriteBulkString(w, value)
+	case command.OpDelete:
+		deleted, err := h.engine.Delete(req.Args[0])
 		if err != nil {
-			return resp.WriteError(writer, "ERR internal server error")
+			return resp.WriteError(w, "ERR internal server error")
 		}
 		if deleted {
-			return resp.WriteInteger(writer, 1)
+			return resp.WriteInteger(w, 1)
 		}
-		return resp.WriteInteger(writer, 0)
-	case command.Unknown:
-		return resp.WriteError(writer, "ERR unknown or unsupported command")
+		return resp.WriteInteger(w, 0)
+	case command.OpUnknown:
+		return resp.WriteError(w, "ERR unknown or unsupported command")
 	default:
-		return resp.WriteError(writer, "ERR internal server error")
+		return resp.WriteError(w, "ERR internal server error")
 	}
 }

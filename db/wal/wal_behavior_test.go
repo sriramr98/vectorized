@@ -133,22 +133,27 @@ func TestReplayReturnsEntriesInSegmentAndLSNOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer w.Close()
-	for _, data := range [][]byte{
+	data := [][]byte{
 		bytes.Repeat([]byte("a"), 700*1024),
 		bytes.Repeat([]byte("b"), 700*1024),
-	} {
-		if err := w.Write(OpSet, data); err != nil {
+	}
+	defer w.Close()
+	for _, d := range data {
+		if err := w.Write(OpSet, d); err != nil {
 			t.Fatal(err)
 		}
 	}
 
 	var got [][]byte
-	if err := w.Replay(func(entry WalEntry) error {
+	n, err := w.Replay(func(entry WalEntry) error {
 		got = append(got, entry.Data)
 		return nil
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if n != uint64(len(data)) {
+		t.Fatalf("expected wal to replay %d records but got %d", len(data), n)
 	}
 	want := [][]byte{bytes.Repeat([]byte("a"), 700*1024), bytes.Repeat([]byte("b"), 700*1024)}
 	if !reflect.DeepEqual(got, want) {
@@ -178,7 +183,7 @@ func TestReplayErrorsOnIncompleteRecord(t *testing.T) {
 	}
 
 	var got []WalEntry
-	err = w.Replay(func(entry WalEntry) error {
+	_, err = w.Replay(func(entry WalEntry) error {
 		got = append(got, entry)
 		return nil
 	})
