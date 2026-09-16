@@ -185,6 +185,9 @@ func TestEngineRecoversFromDurableWALAfterReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	firstEngine := NewEngine(db.NewMemoryStore(), firstWal)
+	if _, err := firstEngine.Recover(); err != nil {
+		t.Fatal(err)
+	}
 	if err := firstEngine.Set([]byte("kept"), []byte("value")); err != nil {
 		t.Fatal(err)
 	}
@@ -203,11 +206,6 @@ func TestEngineRecoversFromDurableWALAfterReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	secondEngine := NewEngine(db.NewMemoryStore(), secondWal)
-	defer func() {
-		if err := secondEngine.Close(); err != nil {
-			t.Errorf("close recovered engine: %v", err)
-		}
-	}()
 	count, err := secondEngine.Recover()
 	if err != nil {
 		t.Fatal(err)
@@ -219,6 +217,31 @@ func TestEngineRecoversFromDurableWALAfterReopen(t *testing.T) {
 	if _, err := secondEngine.Get([]byte("deleted")); !errors.Is(err, ErrKeyNotFound) {
 		t.Fatalf("Get(deleted) error = %v, want %v", err, ErrKeyNotFound)
 	}
+	if err := secondEngine.Set([]byte("after-recovery"), []byte("next-lsn")); err != nil {
+		t.Fatal(err)
+	}
+	if err := secondEngine.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	thirdWal, err := wal.NewWal(nil, walDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	thirdEngine := NewEngine(db.NewMemoryStore(), thirdWal)
+	defer func() {
+		if err := thirdEngine.Close(); err != nil {
+			t.Errorf("close third engine: %v", err)
+		}
+	}()
+	count, err = thirdEngine.Recover()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 4 {
+		t.Fatalf("third Recover() count = %d, want 4", count)
+	}
+	assertEngineValue(t, thirdEngine, "after-recovery", "next-lsn")
 }
 
 func assertEngineValue(t *testing.T, engine *Engine, key, want string) {

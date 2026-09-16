@@ -2,15 +2,10 @@ package wal
 
 import (
 	"bytes"
-	"cmp"
-	"encoding/binary"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"path/filepath"
-	"slices"
 	"sync"
 
 	"github.com/sriramr98/vectorized/utils"
@@ -20,10 +15,21 @@ import (
 const FILE_PREFIX = "wal_segment"
 
 var (
-	ErrUnknownFileName = errors.New("unknown File name")
-	ErrAlreadyClosed   = errors.New("wal already closed")
-	ErrWalUnhealthy    = errors.New("wal is unhealthy")
-	ErrInvalidOptions  = errors.New("invalid WAL options")
+	ErrUnknownFileName  = errors.New("unknown File name")
+	ErrAlreadyClosed    = errors.New("wal already closed")
+	ErrWalUnhealthy     = errors.New("wal is unhealthy")
+	ErrInvalidOptions   = errors.New("invalid WAL options")
+	ErrRecoveryRequired = errors.New("wal recovery is required")
+	ErrAlreadyRecovered = errors.New("wal already recovered")
+)
+
+type walState uint8
+
+const (
+	walNeedsRecovery walState = iota
+	walReady
+	walUnhealthy
+	walClosed
 )
 
 type Wal interface {
@@ -40,9 +46,8 @@ type DurableWal struct {
 	openSegment        *Segment
 	currentSegmentSize uint64
 	dirLocker          *utils.LockedDir
-	closed             bool
 	currentLSN         uint64
-	unhealthy          bool
+	state              walState
 	logger             *slog.Logger
 }
 
@@ -53,7 +58,6 @@ func NewWal(logger *slog.Logger, dirpath string) (*DurableWal, error) {
 
 // NewWalWithOpts creates a Wal with custom options
 func NewWalWithOpts(dirpath string, opts WalOptions, logger *slog.Logger) (*DurableWal, error) {
-
 	if err := opts.Validate(); err != nil {
 		return nil, err
 	}
@@ -61,101 +65,45 @@ func NewWalWithOpts(dirpath string, opts WalOptions, logger *slog.Logger) (*Dura
 	if logger == nil {
 		logger = slog.Default()
 	}
-	dirpath, err := filepath.Abs(dirpath)
+	dirpath, locker, err := prepareWalDirectory(dirpath)
 	if err != nil {
 		return nil, err
 	}
 
-	if err := utils.EnsureDir(dirpath); err != nil {
-		return nil, err
-	}
-
-	locker, err := utils.NewLockedDir(dirpath, "wal.lock")
-	if err != nil {
-		return nil, err
-	}
-
-	if err := locker.TryLock(); err != nil {
-		return nil, err
-	}
-
-	Files, err := os.ReadDir(dirpath)
-	if err != nil {
-		if err := locker.Release(); err != nil {
-			return nil, err
-		}
-		return nil, err
-	}
-
-	var segments []*Segment
-	var lastMaxId uint64
-
-	for _, entry := range Files {
-		if entry.IsDir() {
-			continue
-		}
-
-		name := WalFileName(entry.Name())
-		idx, err := name.Parse()
-		if err != nil {
-			// unknown File name. Skip
-			continue
-		}
-
-		// we don't need to open File since we won't be writing to them
-		segments = append(segments, NewSegment(nil, filepath.Join(dirpath, entry.Name()), uint64(idx)))
-		lastMaxId = max(lastMaxId, uint64(idx))
-	}
-
-	slices.SortFunc(segments, func(a, b *Segment) int {
-		return cmp.Compare(a.idx, b.idx)
-	})
-
-	var openSegment *Segment
-
-	if len(segments) > 0 {
-		openSegment, err = lastOrNewSegment(segments[len(segments)-1], opts, dirpath)
-	} else {
-		openSegment, err = createWalFile(dirpath, lastMaxId+1)
-	}
+	segments, err := discoverWalSegments(dirpath)
 	if err != nil {
 		return nil, errors.Join(err, locker.Release())
 	}
 
-	w := &DurableWal{
+	return &DurableWal{
 		mu:                 sync.Mutex{},
 		dirpath:            dirpath,
 		opts:               opts,
 		segments:           segments,
-		openSegment:        openSegment,
 		dirLocker:          locker,
 		currentSegmentSize: 0,
 		logger:             logger,
-		unhealthy:          false,
-	}
+		state:              walNeedsRecovery,
+	}, nil
+}
 
-	var latestLSN uint64
-	_, err = w.Replay(func(e WalEntry) error {
-		if e.LSN <= latestLSN {
-			return fmt.Errorf("WAL LSN %d is not greater than previous LSN %d", e.LSN, latestLSN)
-		}
-		latestLSN = e.LSN
-		return nil
-	})
+func prepareWalDirectory(dirpath string) (string, *utils.LockedDir, error) {
+	dirpath, err := filepath.Abs(dirpath)
 	if err != nil {
-		w.Close()
-		return nil, fmt.Errorf("recover WAL LSN: %w", err)
+		return "", nil, err
 	}
-	w.currentLSN = latestLSN
+	if err := utils.EnsureDir(dirpath); err != nil {
+		return "", nil, err
+	}
 
-	openSegmentInfo, err := w.openSegment.Stat()
+	locker, err := utils.NewLockedDir(dirpath, "wal.lock")
 	if err != nil {
-		_ = w.Close()
-		return nil, fmt.Errorf("stat active WAL segment %q: %w", w.openSegment.path, err)
+		return "", nil, err
 	}
-	w.currentSegmentSize = uint64(openSegmentInfo.Size())
-
-	return w, nil
+	if err := locker.TryLock(); err != nil {
+		return "", nil, errors.Join(err, locker.Release())
+	}
+	return dirpath, locker, nil
 }
 
 func (w *DurableWal) Write(opType OpType, data []byte) error {
@@ -166,12 +114,13 @@ func (w *DurableWal) Write(opType OpType, data []byte) error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
-	if w.closed {
+	switch w.state {
+	case walClosed:
 		return ErrAlreadyClosed
-	}
-
-	if w.unhealthy {
+	case walUnhealthy:
 		return ErrWalUnhealthy
+	case walNeedsRecovery:
+		return ErrRecoveryRequired
 	}
 
 	w.currentLSN += 1
@@ -190,7 +139,7 @@ func (w *DurableWal) Write(opType OpType, data []byte) error {
 
 	if w.currentSegmentSize+uint64(dataLen) > utils.MBToBytes(w.opts.MaxFileSizeMB) {
 		if err := w.rotateSegment(); err != nil {
-			w.unhealthy = true
+			w.state = walUnhealthy
 			return err
 		}
 	}
@@ -200,13 +149,13 @@ func (w *DurableWal) Write(opType OpType, data []byte) error {
 	if err != nil {
 		// A failed write may have appended only part of the record. Do not allow
 		// another record to be appended until close and reopen repairs the tail.
-		w.unhealthy = true
+		w.state = walUnhealthy
 		return err
 	}
 
 	if err = w.openSegment.Sync(); err != nil {
 		// The record may be buffered by the kernel but not durable on disk.
-		w.unhealthy = true
+		w.state = walUnhealthy
 		return err
 	}
 
@@ -223,35 +172,6 @@ func writeRecord(writer io.Writer, record []byte) (int, error) {
 		return n, io.ErrShortWrite
 	}
 	return n, nil
-}
-
-func (w *DurableWal) rotateSegment() error {
-	w.logger.Debug("rotating segment")
-	openSegmentAlreadyTracked := len(w.segments) > 0 && w.segments[len(w.segments)-1] == w.openSegment
-
-	// Segment.Close will flush any in-memory changes to disk
-	if err := w.openSegment.Close(); err != nil {
-		return err
-	}
-
-	if openSegmentAlreadyTracked {
-		// While a recovered segment is active, its cache represents only the
-		// immutable prefix present at startup. Once the segment is closed, replay
-		// must read it again so records appended in this process are included.
-		w.openSegment.entryCache = nil
-	} else {
-		w.segments = append(w.segments, w.openSegment)
-	}
-
-	newSegment, err := createWalFile(w.dirpath, w.openSegment.idx+1)
-	if err != nil {
-		return err
-	}
-
-	w.currentSegmentSize = 0
-	w.openSegment = newSegment
-
-	return nil
 }
 
 func (w *DurableWal) Close() error {
@@ -287,189 +207,6 @@ func (w *DurableWal) Close() error {
 		w.dirLocker = nil
 	}
 
-	w.closed = true
+	w.state = walClosed
 	return nil
-}
-
-// Replay reads closed segment files and emits entries in segment and LSN order.
-// The active segment is excluded because it can still receive writes.
-func (w *DurableWal) Replay(fn func(e WalEntry) error) (uint64, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	if w.closed {
-		return 0, ErrAlreadyClosed
-	}
-
-	if w.unhealthy {
-		return 0, ErrWalUnhealthy
-	}
-
-	var previousLSN uint64
-	var logCount uint64
-
-	segments := slices.Clone(w.segments)
-	var tailSegment *Segment
-	if len(segments) > 0 {
-		tailSegment = segments[len(segments)-1]
-	}
-	for _, segment := range segments {
-		if segment == nil {
-			continue
-		}
-
-		if len(segment.entryCache) > 0 {
-			for _, entry := range segment.entryCache {
-				if entry.LSN <= previousLSN {
-					return 0, fmt.Errorf("WAL LSN %d is not greater than previous LSN %d", entry.LSN, previousLSN)
-				}
-				previousLSN = entry.LSN
-				logCount += 1
-				if err := fn(entry); err != nil {
-					return 0, err
-				}
-			}
-			continue
-		}
-
-		file, err := os.Open(segment.path)
-		if err != nil {
-			return 0, fmt.Errorf("open WAL segment %q: %w", segment.path, err)
-		}
-
-		var decodedEntries []WalEntry
-		validSize, truncatedTail, replayErr := replaySegment(file, segment == tailSegment, func(entry WalEntry) error {
-			if entry.LSN <= previousLSN {
-				return fmt.Errorf("WAL LSN %d is not greater than previous LSN %d", entry.LSN, previousLSN)
-			}
-
-			decodedEntries = append(decodedEntries, entry)
-			previousLSN = entry.LSN
-			logCount += 1
-			return fn(entry)
-		})
-		closeErr := file.Close()
-		if replayErr != nil {
-			return 0, fmt.Errorf("replay WAL segment %q: %w", segment.path, replayErr)
-		}
-		if closeErr != nil {
-			return 0, fmt.Errorf("close WAL segment %q: %w", segment.path, closeErr)
-		}
-		if truncatedTail {
-			if err := truncateAndSyncSegment(segment.path, validSize); err != nil {
-				return 0, fmt.Errorf("truncate torn WAL tail in segment %q: %w", segment.path, err)
-			}
-		}
-		// Publish the cache only after the complete segment and every callback
-		// succeeded. A failed replay must not turn a partial prefix into the cache.
-		segment.entryCache = decodedEntries
-	}
-
-	return logCount, nil
-}
-
-func replaySegment(r io.Reader, allowTruncatedTail bool, fn func(WalEntry) error) (int64, bool, error) {
-	header := make([]byte, walEntryHeaderSize)
-	var validSize int64
-	for {
-		// first read header bytes to identify body lenth
-		n, err := io.ReadFull(r, header)
-		if err == io.EOF && n == 0 {
-			return validSize, false, nil // clean end between records
-		}
-		if err != nil {
-			if allowTruncatedTail && errors.Is(err, io.ErrUnexpectedEOF) {
-				return validSize, true, nil
-			}
-			return validSize, false, fmt.Errorf("read WAL header: %w", err)
-		}
-
-		// this represents the body length
-		dataLen := binary.BigEndian.Uint32(header[14:18])
-		if dataLen > MaxWalRecordDataBytes {
-			return validSize, false, fmt.Errorf("%w: %d bytes", ErrWalRecordTooLarge, dataLen)
-		}
-		record := make([]byte, walEntryHeaderSize+int(dataLen))
-		copy(record, header)
-
-		// read body
-		if _, err := io.ReadFull(r, record[walEntryHeaderSize:]); err != nil {
-			if allowTruncatedTail && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)) {
-				return validSize, true, nil
-			}
-			return validSize, false, fmt.Errorf("read WAL record body: %w", err)
-		}
-
-		entry, err := DecodeWalEntry(record)
-		if err != nil {
-			return validSize, false, err
-		}
-		if err := fn(entry); err != nil {
-			return validSize, false, err
-		}
-		validSize += int64(len(record))
-	}
-}
-
-func truncateAndSyncSegment(path string, size int64) error {
-	file, err := os.OpenFile(path, os.O_RDWR, utils.PermFileReadWriteOwnerOnly)
-	if err != nil {
-		return err
-	}
-	if err := file.Truncate(size); err != nil {
-		_ = file.Close()
-		return err
-	}
-	if err := file.Sync(); err != nil {
-		_ = file.Close()
-		return err
-	}
-	return file.Close()
-}
-
-// createWalFile creates a new file on disk and sync the directory metadata and returns a Segment
-func createWalFile(dirpath string, idx uint64) (*Segment, error) {
-	return createWalFileWithSync(dirpath, idx, utils.SyncDir)
-}
-
-func createWalFileWithSync(dirpath string, idx uint64, syncDir func(string) error) (*Segment, error) {
-	File_name := NewWalFileName(idx)
-	File_path := filepath.Join(dirpath, File_name)
-
-	File, err := os.OpenFile(File_path, os.O_RDWR|os.O_CREATE|os.O_APPEND, utils.PermFileReadWriteOwnerOnly)
-
-	if err != nil {
-		return nil, err
-	}
-
-	if err := syncDir(dirpath); err != nil {
-		return nil, errors.Join(err, File.Close())
-	}
-
-	return NewSegment(File, File_path, idx), nil
-}
-
-// if the input segment is still not full, return it else create new wal segment
-func lastOrNewSegment(segment *Segment, opts WalOptions, dirpath string) (*Segment, error) {
-	if segment == nil {
-		return segment, errors.New("invalid segment")
-	}
-
-	stat, err := os.Stat(segment.path)
-	if err != nil {
-		return nil, err
-	}
-
-	// Write performs the exact record-size check and rotates if the remaining
-	// space is too small for the next record.
-	if stat.Size() < int64(utils.MBToBytes(opts.MaxFileSizeMB)) {
-		file, err := os.OpenFile(segment.path, os.O_RDWR|os.O_APPEND, utils.PermFileReadWriteOwnerOnly)
-		if err != nil {
-			return nil, err
-		}
-		segment.File = file
-		return segment, nil
-	}
-
-	return createWalFile(dirpath, segment.idx+1)
 }

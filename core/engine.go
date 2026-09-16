@@ -92,6 +92,9 @@ func (e *Engine) Delete(key []byte) (deleted bool, err error) {
 // Recover wipes the store and re-creates the store from walStore
 // returns the number of wal records processed and error if any
 func (e *Engine) Recover() (uint64, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	newStore := db.NewMemoryStore()
 
 	count, err := e.walStore.Replay(func(we wal.WalEntry) error {

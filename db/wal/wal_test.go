@@ -8,12 +8,18 @@ import (
 	"testing"
 )
 
-func TestNewWalCreatesDirectoryAndFirstSegment(t *testing.T) {
+func TestReplayCreatesFirstSegmentForEmptyWal(t *testing.T) {
 	walDir := filepath.Join(t.TempDir(), "nested", "wal")
 
 	w, err := NewWal(nil, walDir)
 	if err != nil {
 		t.Fatalf("NewWal() error = %v", err)
+	}
+	if w.openSegment != nil {
+		t.Fatal("active segment exists before startup recovery")
+	}
+	if _, err := w.Replay(func(WalEntry) error { return nil }); err != nil {
+		t.Fatalf("Replay() error = %v", err)
 	}
 	closeTestWal(t, w)
 
@@ -70,22 +76,22 @@ func TestNewWalDiscoversOnlyValidSegmentsAndReusesLatestWithSpace(t *testing.T) 
 		t.Fatalf("NewWal() error = %v", err)
 	}
 	defer closeTestWal(t, w)
+	if _, err := w.Replay(func(WalEntry) error { return nil }); err != nil {
+		t.Fatalf("Replay() error = %v", err)
+	}
 
 	gotIndexes := make([]uint64, len(w.segments))
 	for i, segment := range w.segments {
 		gotIndexes[i] = segment.idx
-		if segment.idx != 10 && segment.File != nil {
+		if segment.File != nil {
 			t.Fatalf("closed segment %d has an open file", segment.idx)
 		}
 	}
-	if want := []uint64{0, 3, 9, 10}; slices.Compare(gotIndexes, want) != 0 {
+	if want := []uint64{0, 3, 9}; slices.Compare(gotIndexes, want) != 0 {
 		t.Fatalf("discovered segment indexes = %v, want %v", gotIndexes, want)
 	}
 	if w.openSegment.idx != 10 {
 		t.Fatalf("open segment index = %d, want reused segment 10", w.openSegment.idx)
-	}
-	if w.openSegment != w.segments[len(w.segments)-1] {
-		t.Fatal("active segment does not reference the discovered latest segment")
 	}
 	if w.openSegment.File == nil {
 		t.Fatal("reused active segment does not have an open file")

@@ -17,6 +17,7 @@ func TestPeriodicSyncMakesSubLimitWritesAvailableFromTheActiveSegment(t *testing
 	}
 
 	defer closeWal(t, w)
+	recoverEmptyWal(t, w)
 
 	data := []byte("periodically synced")
 	if err := w.Write(OpSet, data); err != nil {
