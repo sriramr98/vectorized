@@ -1,0 +1,14 @@
+---
+const { compact = false } = Astro.props;
+---
+
+<header class:list={["site-header", { compact }]}>
+  <a class="brand" href="/" aria-label="Vectorized home">
+    <span class="brand-mark" aria-hidden="true"><i></i><i></i><i></i></span>
+    <span>VECTOR<span class="brand-accent">IZED</span></span>
+  </a>
+  <nav aria-label="Primary navigation">
+    <a href="/book">Read the blog</a>
+    <a href="https://github.com/sriramr98/vectorized">Source <span aria-hidden="true">↗</span></a>
+  </nav>
+</header>

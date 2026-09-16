@@ -1,0 +1,43 @@
+---
+import { getCollection } from "astro:content";
+import BaseLayout from "../../layouts/BaseLayout.astro";
+
+const lessons = (await getCollection("chapters")).sort((a, b) => a.data.order - b.data.order);
+const chapterGroups = Map.groupBy(lessons, (lesson) => lesson.data.chapter);
+---
+
+<BaseLayout title="Chapters — Vectorized" description="Follow the construction of Vectorized from a Go development environment to an LSM tree and vector search." compactHeader>
+  <section class="book-index">
+    <header class="book-index-header">
+      <p class="eyebrow">Vectorized field guide</p>
+      <h1>Build the database.</h1>
+      <p>Start with the environment, then follow the implementation in order. Each chapter is divided into small lessons.</p>
+    </header>
+
+    <div class="chapter-groups">
+      {[...chapterGroups.entries()].map(([chapterNumber, chapterLessons]) => (
+        <section class="chapter-group">
+          <header>
+            <span>CHAPTER {String(chapterNumber).padStart(2, "0")}</span>
+            <h2>{chapterLessons[0].data.chapterTitle}</h2>
+            <p>{chapterNumber === 0
+              ? "Prepare Go and verify the project before changing the database."
+              : "Build the network boundary, parse requests, and store the first values in memory."}</p>
+          </header>
+          <ol>
+            {chapterLessons.map((lesson) => (
+              <li>
+                <a href={`/book/${lesson.id}`}>
+                  <span class="lesson-number">{chapterNumber}.{lesson.data.lesson}</span>
+                  <div><h3>{lesson.data.title}</h3><p>{lesson.data.description}</p></div>
+                  <span class:list={["status", lesson.data.status]}>{lesson.data.status}</span>
+                  <b aria-hidden="true">→</b>
+                </a>
+              </li>
+            ))}
+          </ol>
+        </section>
+      ))}
+    </div>
+  </section>
+</BaseLayout>

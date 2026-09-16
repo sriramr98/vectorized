@@ -1,0 +1,32 @@
+---
+import SiteHeader from "../components/SiteHeader.astro";
+import "../styles/global.css";
+
+interface Props {
+  title: string;
+  description: string;
+  compactHeader?: boolean;
+}
+
+const { title, description, compactHeader = false } = Astro.props;
+---
+
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="description" content={description} />
+    <meta name="theme-color" content="#090b0f" />
+    <title>{title}</title>
+  </head>
+  <body>
+    <div class="noise" aria-hidden="true"></div>
+    <SiteHeader compact={compactHeader} />
+    <main><slot /></main>
+    <footer>
+      <span>Vectorized Field Guide</span>
+      <span>Built alongside the database.</span>
+    </footer>
+  </body>
+</html>

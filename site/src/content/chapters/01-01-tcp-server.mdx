@@ -1,0 +1,52 @@
+---
+title: "Accept TCP connections"
+description: "Build the protocol-agnostic server that owns connection lifecycle and graceful shutdown."
+order: 10
+chapter: 1
+chapterTitle: "Basic in-memory database"
+lesson: 1
+status: "complete"
+readTime: "10 MIN"
+sourceRef: "af23438"
+topics: ["GO", "TCP", "CONCURRENCY"]
+---
+
+## Begin at the network boundary
+
+The database starts as a TCP process. Its server accepts connections, delegates each connection to a handler, and closes active clients during shutdown.
+
+<div class="flow-strip">
+  <span>LISTENER</span><i>→</i><span class="hot">SERVER</span><i>→</i><span>HANDLER</span>
+</div>
+
+The server deliberately knows nothing about RESP, commands, or storage. A handler receives one connection and decides how to use it.
+
+## Define ownership
+
+The listener is injected into `Server`. That makes operating-system setup the caller's responsibility and lets tests provide a real ephemeral listener.
+
+<div class="invariant-callout">
+  <span>INVARIANT 01</span>
+  <p>When Serve returns after cancellation, every accepted connection has been closed and every handler has returned.</p>
+</div>
+
+The server therefore tracks active connections and handler goroutines. Cancellation closes the listener to unblock `Accept`, closes each client connection, and waits for the handlers.
+
+## Read the lifecycle
+
+Follow `Server.Serve` in `transport/tcpserver/server.go` and identify four moments:
+
+1. Validate the injected dependencies.
+2. Arrange for cancellation to close the listener.
+3. Accept and track each connection before starting its goroutine.
+4. Shut down connections and wait for all handlers.
+
+The important part is the ordering. A connection must be tracked before its goroutine starts, otherwise shutdown can miss it.
+
+## Prove shutdown
+
+```bash
+go test ./transport/tcpserver
+```
+
+The tests establish that cancellation closes active connections and allows `Serve` to return. The next lesson gives those connections a wire format.

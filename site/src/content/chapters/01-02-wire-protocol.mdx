@@ -1,0 +1,51 @@
+---
+title: "Parse the wire protocol"
+description: "Read a small binary-safe RESP2 subset and keep framing separate from command semantics."
+order: 11
+chapter: 1
+chapterTitle: "Basic in-memory database"
+lesson: 2
+status: "complete"
+readTime: "11 MIN"
+sourceRef: "c1dfcfa"
+topics: ["RESP2", "PARSING", "BINARY DATA"]
+---
+
+## Give the stream structure
+
+TCP delivers a stream of bytes, not messages. Vectorized uses a small RESP2 subset to determine where a request begins and ends.
+
+For now, every request is an array of bulk strings. A `SET key value` request has this shape:
+
+```text
+*3\r\n
+$3\r\nSET\r\n
+$3\r\nkey\r\n
+$5\r\nvalue\r\n
+```
+
+The lengths make the protocol binary-safe: values do not need a special delimiter and may contain arbitrary bytes.
+
+## Keep framing separate
+
+`resp.ReadRequest` answers only one question: is this a complete, valid array of bulk-string arguments?
+
+<div class="invariant-callout">
+  <span>INVARIANT 02</span>
+  <p>The RESP package validates message framing without deciding which database command the request represents.</p>
+</div>
+
+Command names and argument counts belong to `protocol/command`. This separation keeps malformed bytes distinct from a well-formed but unsupported command.
+
+## Bound every allocation
+
+Lengths arrive from an untrusted client. Before allocating, the parser rejects negative values, oversized argument counts, and oversized bulk strings. It also uses `io.ReadFull`, because a single read is not guaranteed to fill the requested buffer.
+
+## Prove framing
+
+```bash
+go test ./protocol/resp
+go test ./protocol/command
+```
+
+After decoding, the handler has a typed operation. The final lesson in this chapter gives those operations somewhere to store data.

@@ -1,0 +1,78 @@
+---
+title: "Store values in memory"
+description: "Build the small concurrency-safe store behind Vectorized's wire protocol, and make byte ownership explicit."
+order: 12
+chapter: 1
+chapterTitle: "Basic in-memory database"
+lesson: 3
+status: "complete"
+readTime: "12 MIN"
+sourceRef: "ddb7785"
+topics: ["GO", "CONCURRENCY", "OWNERSHIP"]
+---
+
+import MethodExercise from "../../components/MethodExercise.astro";
+
+## The problem
+
+A TCP server can accept bytes, and RESP can give those bytes structure. But neither answers the question that matters to a database client: **what happens to my value after `SET` returns?**
+
+The first storage layer is deliberately small. It gives us a place to define semantics before durability, sorted tables, and vector indexes make the system harder to reason about.
+
+<div class="flow-strip">
+  <span>CLIENT</span><i>→</i><span>RESP</span><i>→</i><span class="hot">MEMORY STORE</span><i>→</i><span>RESPONSE</span>
+</div>
+
+## Establish the invariant
+
+The store accepts byte slices, but it must not retain ownership of memory that a caller can later mutate. Likewise, a value returned by `Get` must not allow a client to mutate the database behind its lock.
+
+<div class="invariant-callout">
+  <span>INVARIANT 03</span>
+  <p>Callers and the store never share mutable value bytes.</p>
+</div>
+
+That decision allows the protocol, storage engine, and future WAL to evolve independently without invisible aliasing between layers.
+
+## Implement `Set`
+
+<MethodExercise
+  id="memory-store-set"
+  title="Store a value without borrowing it"
+  file="db/memory.go"
+  skeleton={`func (s *MemoryStore) Set(key, value []byte) error {
+    // Protect the map from concurrent writers.
+    // Store an owned copy of value.
+    return nil
+}`}
+  contract="After Set returns nil, a later Get must observe the supplied bytes even if the caller reuses its input buffer."
+  invariants={[
+    "Concurrent reads and writes cannot race on the map.",
+    "The store does not retain caller-owned value bytes.",
+    "The operation returns only after the new value is visible.",
+  ]}
+  hints={[
+    "A Go map cannot be written concurrently. Which lock mode excludes both readers and writers?",
+    "The key is converted to a string, which copies its bytes. The value needs an equivalent ownership boundary.",
+    "There is already a small clone helper in this package.",
+  ]}
+  testCommand="go test ./db -run 'TestMemoryStore'"
+/>
+
+## Prove the behavior
+
+The valuable test is not merely “set then get.” It mutates the input after `Set` and mutates the result after `Get`. That test preserves the ownership boundary when the in-memory map is eventually replaced by an LSM-tree engine.
+
+```bash
+go test -race ./db
+```
+
+<div class="proof-grid">
+  <div><span>01</span><strong>Isolation</strong><p>Input and returned slices cannot mutate stored state.</p></div>
+  <div><span>02</span><strong>Deletion</strong><p>Delete reports whether the key existed.</p></div>
+  <div><span>03</span><strong>Proof gap</strong><p>A concurrent stress test still needs to be added.</p></div>
+</div>
+
+## What remains broken
+
+The store loses everything when the process exits. The next chapter will introduce a write-ahead log and define precisely when Vectorized may acknowledge a mutation.

@@ -1,0 +1,59 @@
+---
+import { getCollection, render } from "astro:content";
+import BaseLayout from "../../layouts/BaseLayout.astro";
+
+export async function getStaticPaths() {
+  const chapters = await getCollection("chapters");
+  return chapters.map((chapter) => ({ params: { slug: chapter.id }, props: { chapter } }));
+}
+
+const { chapter } = Astro.props;
+const chapters = (await getCollection("chapters")).sort((a, b) => a.data.order - b.data.order);
+const chapterGroups = Map.groupBy(chapters, (item) => item.data.chapter);
+const currentIndex = chapters.findIndex((item) => item.id === chapter.id);
+const previous = chapters[currentIndex - 1];
+const next = chapters[currentIndex + 1];
+const { Content, headings } = await render(chapter);
+---
+
+<BaseLayout title={`${chapter.data.title} — Vectorized`} description={chapter.data.description} compactHeader>
+  <div class="book-shell">
+    <aside class="book-rail">
+      <a class="rail-home" href="/book">← All chapters</a>
+      <nav>
+        {[...chapterGroups.entries()].map(([chapterNumber, lessons]) => (
+          <section class="rail-chapter">
+            <p class="rail-label">Chapter {chapterNumber}</p>
+            <h2>{lessons[0].data.chapterTitle}</h2>
+            {lessons.map((item) => (
+              <a class:list={[{ current: item.id === chapter.id }]} href={`/book/${item.id}`}>
+                <span>{chapterNumber}.{item.data.lesson}</span>
+                <div><strong>{item.data.title}</strong><small>{item.data.status}</small></div>
+              </a>
+            ))}
+          </section>
+        ))}
+      </nav>
+    </aside>
+
+    <article class="chapter">
+      <header class="chapter-header">
+        <div class="chapter-overline"><span>CHAPTER {chapter.data.chapter} · LESSON {chapter.data.lesson}</span><span>{chapter.data.readTime}</span></div>
+        <h1>{chapter.data.title}</h1>
+        <p>{chapter.data.description}</p>
+        <div class="chapter-tags">{chapter.data.topics.map((topic) => <span>{topic}</span>)}<span>REF {chapter.data.sourceRef}</span></div>
+      </header>
+      <div class="article-body"><Content /></div>
+      <nav class="chapter-pagination" aria-label="Chapter navigation">
+        {previous ? <a href={`/book/${previous.id}`}>← {previous.data.title}</a> : <span></span>}
+        {next ? <a href={`/book/${next.id}`}>{next.data.title} →</a> : <a href="/book">All chapters →</a>}
+      </nav>
+    </article>
+
+    <aside class="page-toc">
+      <p class="rail-label">On this page</p>
+      {headings.filter((heading) => heading.depth === 2).map((heading) => <a href={`#${heading.slug}`}>{heading.text}</a>)}
+      <div class="proof-badge"><span>✓</span><div><strong>Proof included</strong><small>Executable Go tests</small></div></div>
+    </aside>
+  </div>
+</BaseLayout>

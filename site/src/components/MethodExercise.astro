@@ -1,0 +1,73 @@
+---
+import { Code } from "astro-expressive-code/components";
+import { exercises } from "../data/exercises";
+
+interface Props {
+  id: string;
+  title: string;
+  file: string;
+  skeleton: string;
+  contract: string;
+  invariants: string[];
+  hints: string[];
+  testCommand: string;
+}
+
+const { id, title, file, skeleton, contract, invariants, hints, testCommand } = Astro.props;
+const solution = exercises[id];
+---
+
+<section class="exercise">
+  <div class="exercise-kicker"><span>IMPLEMENTATION CHECKPOINT</span><span>01</span></div>
+  <div class="exercise-heading">
+    <div>
+      <p class="eyebrow">Your turn</p>
+      <h2>{title}</h2>
+    </div>
+    <span class="file-pill">{file}</span>
+  </div>
+
+  <div class="exercise-grid">
+    <Code code={skeleton} lang="go" title={`${file} · skeleton`} />
+    <aside class="contract-card">
+      <p class="card-label">Contract</p>
+      <p>{contract}</p>
+      <p class="card-label">Must remain true</p>
+      <ul>{invariants.map((invariant) => <li>{invariant}</li>)}</ul>
+    </aside>
+  </div>
+
+  <div class="local-panel">
+    <div>
+      <span class="step-number">01</span>
+      <p>Create an exercise branch from the chapter checkpoint.</p>
+      <Code code="git switch -c exercise/memory-store" lang="shell" />
+    </div>
+    <div>
+      <span class="step-number">02</span>
+      <p>Replace the method body with the skeleton, implement the contract, then run:</p>
+      <Code code={testCommand} lang="shell" />
+    </div>
+  </div>
+
+  <div class="hints">
+    <p class="card-label">Need a nudge?</p>
+    {hints.map((hint, index) => (
+      <details>
+        <summary>Reveal hint {index + 1}</summary>
+        <p>{hint}</p>
+      </details>
+    ))}
+  </div>
+
+  {solution && (
+    <details class="solution-panel">
+      <summary>Reveal implementation</summary>
+      <div class="solution-heading">
+        <div><p class="eyebrow">Reference implementation</p><h3>One way to satisfy the contract</h3></div>
+      </div>
+      <Code code={solution.code} lang="go" title={file} />
+      <ol class="solution-notes">{solution.notes.map((note) => <li>{note}</li>)}</ol>
+    </details>
+  )}
+</section>

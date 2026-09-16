@@ -1,0 +1,47 @@
+---
+title: "Run the project"
+description: "Clone Vectorized, download its modules, run the tests, and start the server."
+order: 1
+chapter: 0
+chapterTitle: "Environment setup"
+lesson: 2
+status: "complete"
+readTime: "4 MIN"
+sourceRef: "c6eb03b"
+topics: ["GO", "GIT", "TOOLING"]
+---
+
+## Get the source
+
+Clone the repository and enter the project directory:
+
+```bash
+git clone https://github.com/sriramr98/vectorized.git
+cd vectorized
+```
+
+Download the modules and run the complete test suite:
+
+```bash
+go mod download
+go test ./...
+```
+
+## Start Vectorized
+
+Run the in-memory server on its default port:
+
+```bash
+go run . server
+```
+
+The process now listens for RESP requests on port `6380`. Stop it with `Ctrl+C`.
+
+<div class="invariant-callout">
+  <span>CHECKPOINT</span>
+  <p>The repository builds, the tests pass, and the server starts locally.</p>
+</div>
+
+## Next
+
+The first implementation chapter begins with the TCP server that owns client connections and shutdown.

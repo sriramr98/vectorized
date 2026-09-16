@@ -1,0 +1,33 @@
+---
+title: "Install Go 1.27"
+description: "Install Go 1.27 and verify the toolchain from your terminal."
+order: 0
+chapter: 0
+chapterTitle: "Environment setup"
+lesson: 1
+status: "complete"
+readTime: "3 MIN"
+sourceRef: "go.mod"
+topics: ["GO", "TOOLING"]
+---
+
+## Install Go 1.27
+
+Vectorized uses **Go 1.27**. Install Go 1.27 using the official installer or the version manager you already use.
+
+Confirm that the toolchain is available:
+
+```bash
+go version
+```
+
+The output should report Go 1.27. We are not changing the version declared in `go.mod` yet; that will be updated separately when the project is ready to adopt the new toolchain.
+
+<div class="invariant-callout">
+  <span>CHECKPOINT</span>
+  <p>The `go` command is available and reports Go 1.27.</p>
+</div>
+
+## Next
+
+With the toolchain installed, the next lesson downloads the project and runs its tests and server.
