@@ -52,6 +52,7 @@ func discoverWalSegments(dirpath string) ([]*Segment, error) {
 	return segments, nil
 }
 
+// if latest segment has enough space, reuse it else create new segment file
 func (w *DurableWal) activateWritableSegment() error {
 	if len(w.segments) == 0 {
 		segment, err := createWalFile(w.dirpath, 1)
