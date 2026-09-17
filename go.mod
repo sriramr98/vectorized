@@ -1,6 +1,6 @@
 module github.com/sriramr98/vectorized
 
-go 1.25.14
+go 1.27.1
 
 require (
 	github.com/knadh/koanf/parsers/yaml v1.1.1
