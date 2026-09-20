@@ -86,11 +86,20 @@ func (e *Engine) Delete(key []byte) (deleted bool, err error) {
 		return false, err
 	}
 
-	if _, err := e.walStore.Write(wal.OpDelete, buf.Bytes()); err != nil {
+	lsn, err := e.walStore.Write(wal.OpDelete, buf.Bytes())
+	if err != nil {
 		return false, err
 	}
 
-	return e.store.Delete(string(key)), nil
+	if err = e.store.Apply(db.Record{
+		Key:     string(key),
+		Deleted: true,
+		Lsn:     lsn,
+	}); err != nil {
+		return false, err
+	}
+
+	return true, nil
 
 }
 
@@ -132,9 +141,11 @@ func (e *Engine) Recover() (uint64, error) {
 			if len(res) != 1 {
 				return fmt.Errorf("delete expects exactly one argument but got %d", len(res))
 			}
-
-			//TODO: Do we need tombstone when we recover?
-			newStore.Delete(string(res[0]))
+			newStore.Apply(db.Record{
+				Key:     string(res[0]),
+				Deleted: true,
+				Lsn:     we.LSN,
+			})
 			return nil
 		default:
 			return fmt.Errorf("unknown op type in wal %d", we.OpType)

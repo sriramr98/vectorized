@@ -33,7 +33,7 @@ func TestBasicMemTableSetGetPreservesRecordAndDefensivelyCopiesData(t *testing.T
 
 	got.Data[0] = 'Y'
 	again, found := table.Get("key")
-	if !found || bytes.Equal(again.Data, []byte("value")) {
+	if !found || !bytes.Equal(again.Data, []byte("value")) {
 		t.Fatalf("Get() after caller mutation = %+v, want unchanged value", again)
 	}
 }
@@ -44,7 +44,7 @@ func TestBasicMemTableDeleteHidesValueButRetainsTombstoneForFlush(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	if !table.Delete("b") {
+	if err := table.Apply(Record{Key: "b", Deleted: true, Lsn: 8}); err != nil {
 		t.Fatal("Delete() = false, want true")
 	}
 	if _, found := table.Get("b"); found {
@@ -95,8 +95,12 @@ func TestBasicMemTableFreezeCreatesReadOnlyTable(t *testing.T) {
 	if err := table.Apply(Record{Key: "new", Data: []byte("value"), Lsn: 2}); !errors.Is(err, ErrSetNotAllowedInFrozen) {
 		t.Fatalf("Set() on frozen table error = %v, want %v", err, ErrSetNotAllowedInFrozen)
 	}
-	if table.Delete("kept") {
-		t.Fatal("Delete() on frozen table = true, want false")
+	if err := table.Apply(Record{
+		Key:     "kept",
+		Deleted: true,
+		Lsn:     3,
+	}); err == nil {
+		t.Fatal("Delete() on frozen table should return error but didn't")
 	}
 
 	got, found := frozen.Get("kept")

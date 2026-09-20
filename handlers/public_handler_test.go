@@ -50,9 +50,6 @@ func TestPublicTCPHandlerReportsMalformedRequests(t *testing.T) {
 	}()
 
 	assertRequestResponse(t, clientConn, "PING\r\n", "-ERR protocol error\r\n")
-	if err := clientConn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
-		t.Fatal(err)
-	}
 	if _, err := clientConn.Read(make([]byte, 1)); err != io.EOF {
 		t.Fatalf("connection read error = %v, want EOF", err)
 	}

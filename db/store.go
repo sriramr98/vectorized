@@ -3,7 +3,6 @@ package db
 
 type MemTable interface {
 	Apply(record Record) error
-	Delete(key string) (deleted bool)
 	// Clear clears all data from the store
 	Clear() error
 }

@@ -91,26 +91,7 @@ func (s *BasicMemTable) Get(key string) (Record, bool) {
 		return Record{}, false
 	}
 
-	return *value, true
-}
-
-// Delete removes key and reports if data was deleted
-func (s *BasicMemTable) Delete(key string) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.frozen {
-		return false
-	}
-
-	val, found := s.values[key]
-
-	if !found {
-		return false
-	}
-
-	val.Deleted = true
-	return true
+	return value.Clone(), true
 }
 
 func (s *BasicMemTable) Clear() error {
