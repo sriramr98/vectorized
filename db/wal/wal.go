@@ -34,7 +34,7 @@ const (
 
 type Wal interface {
 	Replay(func(WalEntry) error) (uint64, error)
-	Write(op OpType, data []byte) error
+	Write(op OpType, data []byte) (lsn uint64, err error)
 	Close() error
 }
 
@@ -106,9 +106,9 @@ func prepareWalDirectory(dirpath string) (string, *utils.LockedDir, error) {
 	return dirpath, locker, nil
 }
 
-func (w *DurableWal) Write(opType OpType, data []byte) error {
+func (w *DurableWal) Write(opType OpType, data []byte) (uint64, error) {
 	if opType != OpDelete && opType != OpSet {
-		return ErrInvalidWalEntry
+		return 0, ErrInvalidWalEntry
 	}
 
 	w.mu.Lock()
@@ -116,11 +116,11 @@ func (w *DurableWal) Write(opType OpType, data []byte) error {
 
 	switch w.state {
 	case walClosed:
-		return ErrAlreadyClosed
+		return 0, ErrAlreadyClosed
 	case walUnhealthy:
-		return ErrWalUnhealthy
+		return 0, ErrWalUnhealthy
 	case walNeedsRecovery:
-		return ErrRecoveryRequired
+		return 0, ErrRecoveryRequired
 	}
 
 	w.currentLSN += 1
@@ -134,13 +134,13 @@ func (w *DurableWal) Write(opType OpType, data []byte) error {
 	buf := bytes.NewBuffer([]byte{})
 	dataLen, err := entry.Encode(buf)
 	if err != nil {
-		return err
+		return 0, err
 	}
 
 	if w.currentSegmentSize+uint64(dataLen) > utils.MBToBytes(w.opts.MaxFileSizeMB) {
 		if err := w.rotateSegment(); err != nil {
 			w.state = walUnhealthy
-			return err
+			return 0, err
 		}
 	}
 
@@ -150,17 +150,17 @@ func (w *DurableWal) Write(opType OpType, data []byte) error {
 		// A failed write may have appended only part of the record. Do not allow
 		// another record to be appended until close and reopen repairs the tail.
 		w.state = walUnhealthy
-		return err
+		return 0, err
 	}
 
 	if err = w.openSegment.Sync(); err != nil {
 		// The record may be buffered by the kernel but not durable on disk.
 		w.state = walUnhealthy
-		return err
+		return 0, err
 	}
 
 	w.currentSegmentSize += uint64(n)
-	return nil
+	return w.currentLSN, nil
 }
 
 func writeRecord(writer io.Writer, record []byte) (int, error) {

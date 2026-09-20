@@ -25,10 +25,10 @@ func TestWriteRotatesBeforeARecordWouldExceedTheSegmentLimit(t *testing.T) {
 
 	first := bytes.Repeat([]byte("a"), 700*1024)
 	second := bytes.Repeat([]byte("b"), 700*1024)
-	if err := w.Write(OpSet, first); err != nil {
+	if _, err := w.Write(OpSet, first); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.Write(OpDelete, second); err != nil {
+	if _, err := w.Write(OpDelete, second); err != nil {
 		t.Fatal(err)
 	}
 
@@ -64,7 +64,7 @@ func TestRotationPreservesRecordOrderAndDoesNotSplitRecords(t *testing.T) {
 		bytes.Repeat([]byte("3"), 600*1024),
 	}
 	for _, data := range writes {
-		if err := w.Write(OpSet, data); err != nil {
+		if _, err := w.Write(OpSet, data); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -92,7 +92,7 @@ func TestRestartReusesLatestSegmentAndAppendsWithoutOverwriting(t *testing.T) {
 		t.Fatal(err)
 	}
 	recoverEmptyWal(t, w)
-	if err := w.Write(OpSet, []byte("before restart")); err != nil {
+	if _, err := w.Write(OpSet, []byte("before restart")); err != nil {
 		t.Fatal(err)
 	}
 	closeWal(t, w)
@@ -120,7 +120,7 @@ func TestRestartReusesLatestSegmentAndAppendsWithoutOverwriting(t *testing.T) {
 	if got := reopened.currentSegmentSize; got != wantInitialSize {
 		t.Fatalf("active segment size = %d, want recovered size %d", got, wantInitialSize)
 	}
-	if err := reopened.Write(OpDelete, []byte("after restart")); err != nil {
+	if _, err := reopened.Write(OpDelete, []byte("after restart")); err != nil {
 		t.Fatal(err)
 	}
 
@@ -146,7 +146,7 @@ func TestReusedSegmentAccountsForExistingBytesWhenRotating(t *testing.T) {
 	}
 	recoverEmptyWal(t, w)
 	first := bytes.Repeat([]byte("a"), 700*1024)
-	if err := w.Write(OpSet, first); err != nil {
+	if _, err := w.Write(OpSet, first); err != nil {
 		t.Fatal(err)
 	}
 	closeWal(t, w)
@@ -160,7 +160,7 @@ func TestReusedSegmentAccountsForExistingBytesWhenRotating(t *testing.T) {
 		t.Fatal(err)
 	}
 	second := bytes.Repeat([]byte("b"), 700*1024)
-	if err := reopened.Write(OpSet, second); err != nil {
+	if _, err := reopened.Write(OpSet, second); err != nil {
 		t.Fatal(err)
 	}
 
@@ -185,7 +185,7 @@ func TestReplayRunsOnceAndMakesRecoveredWalWritable(t *testing.T) {
 		t.Fatal(err)
 	}
 	recoverEmptyWal(t, w)
-	if err := w.Write(OpSet, []byte("recovered")); err != nil {
+	if _, err := w.Write(OpSet, []byte("recovered")); err != nil {
 		t.Fatal(err)
 	}
 	closeWal(t, w)
@@ -209,7 +209,7 @@ func TestReplayRunsOnceAndMakesRecoveredWalWritable(t *testing.T) {
 	if _, err := reopened.Replay(func(WalEntry) error { return nil }); !errors.Is(err, ErrAlreadyRecovered) {
 		t.Fatalf("second Replay() error = %v, want %v", err, ErrAlreadyRecovered)
 	}
-	if err := reopened.Write(OpDelete, []byte("after recovery")); err != nil {
+	if _, err := reopened.Write(OpDelete, []byte("after recovery")); err != nil {
 		t.Fatalf("Write() after recovery error = %v", err)
 	}
 }
@@ -222,7 +222,7 @@ func TestRestartCreatesNextSegmentWhenLatestIsFull(t *testing.T) {
 	}
 	recoverEmptyWal(t, w)
 	data := bytes.Repeat([]byte("x"), (1<<20)-walEntryHeaderSize)
-	if err := w.Write(OpSet, data); err != nil {
+	if _, err := w.Write(OpSet, data); err != nil {
 		t.Fatal(err)
 	}
 	closeWal(t, w)
@@ -251,7 +251,7 @@ func TestWriteAfterCloseIsRejected(t *testing.T) {
 	if err := w.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.Write(OpSet, []byte("after close")); !errors.Is(err, ErrAlreadyClosed) {
+	if _, err := w.Write(OpSet, []byte("after close")); !errors.Is(err, ErrAlreadyClosed) {
 		t.Fatalf("Write after Close() error = %v, want %v", err, ErrAlreadyClosed)
 	}
 }
@@ -290,7 +290,7 @@ func TestWriteRejectsInvalidOperationWithoutChangingState(t *testing.T) {
 
 	wantLSN := w.currentLSN
 	wantSize := w.currentSegmentSize
-	if err := w.Write(NoOp, []byte("invalid")); !errors.Is(err, ErrInvalidWalEntry) {
+	if _, err := w.Write(NoOp, []byte("invalid")); !errors.Is(err, ErrInvalidWalEntry) {
 		t.Fatalf("Write() error = %v, want %v", err, ErrInvalidWalEntry)
 	}
 	if w.currentLSN != wantLSN {
@@ -317,7 +317,7 @@ func TestAppendFailureMarksWalUnhealthy(t *testing.T) {
 	}
 	w.openSegment.File = readOnly
 
-	if err := w.Write(OpSet, []byte("value")); err == nil {
+	if _, err := w.Write(OpSet, []byte("value")); err == nil {
 		t.Fatal("Write() error = nil, want append failure")
 	}
 	assertWalRejectsOperationsAsUnhealthy(t, w)
@@ -341,7 +341,7 @@ func TestSyncFailureMarksWalUnhealthy(t *testing.T) {
 	defer reader.Close()
 	w.openSegment.File = writer
 
-	if err := w.Write(OpSet, []byte("value")); err == nil {
+	if _, err := w.Write(OpSet, []byte("value")); err == nil {
 		t.Fatal("Write() error = nil, want sync failure")
 	}
 	assertWalRejectsOperationsAsUnhealthy(t, w)
@@ -355,11 +355,11 @@ func TestRotationFailureMarksWalUnhealthy(t *testing.T) {
 	}
 	recoverEmptyWal(t, w)
 
-	if err := w.Write(OpSet, bytes.Repeat([]byte("a"), 700*1024)); err != nil {
+	if _, err := w.Write(OpSet, bytes.Repeat([]byte("a"), 700*1024)); err != nil {
 		t.Fatal(err)
 	}
 	w.dirpath = filepath.Join(t.TempDir(), "missing")
-	if err := w.Write(OpSet, bytes.Repeat([]byte("b"), 700*1024)); err == nil {
+	if _, err := w.Write(OpSet, bytes.Repeat([]byte("b"), 700*1024)); err == nil {
 		t.Fatal("Write() error = nil, want rotation failure")
 	}
 	assertWalRejectsOperationsAsUnhealthy(t, w)
@@ -378,7 +378,7 @@ func TestWriteAssignsStrictlyIncreasingLSNs(t *testing.T) {
 	recoverEmptyWal(t, w)
 
 	for _, data := range [][]byte{[]byte("one"), []byte("two"), []byte("three")} {
-		if err := w.Write(OpSet, data); err != nil {
+		if _, err := w.Write(OpSet, data); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -414,7 +414,7 @@ func TestReplayReturnsEntriesInSegmentAndLSNOrder(t *testing.T) {
 		bytes.Repeat([]byte("c"), 700*1024),
 	}
 	for _, d := range writes {
-		if err := w.Write(OpSet, d); err != nil {
+		if _, err := w.Write(OpSet, d); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -448,7 +448,7 @@ func TestWriteRequiresSuccessfulRecovery(t *testing.T) {
 	}
 	defer closeWal(t, w)
 
-	if err := w.Write(OpSet, []byte("before recovery")); !errors.Is(err, ErrRecoveryRequired) {
+	if _, err := w.Write(OpSet, []byte("before recovery")); !errors.Is(err, ErrRecoveryRequired) {
 		t.Fatalf("Write() error = %v, want %v", err, ErrRecoveryRequired)
 	}
 }
@@ -462,7 +462,7 @@ func TestReplayAfterCallbackFailureStillReturnsCompleteSegment(t *testing.T) {
 	recoverEmptyWal(t, w)
 
 	for _, data := range [][]byte{[]byte("first"), []byte("second")} {
-		if err := w.Write(OpSet, data); err != nil {
+		if _, err := w.Write(OpSet, data); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -524,7 +524,7 @@ func TestReplayTruncatesIncompleteFinalRecord(t *testing.T) {
 				t.Fatal(err)
 			}
 			recoverEmptyWal(t, w)
-			if err := w.Write(OpSet, []byte("complete")); err != nil {
+			if _, err := w.Write(OpSet, []byte("complete")); err != nil {
 				t.Fatal(err)
 			}
 			closeWal(t, w)
@@ -582,10 +582,10 @@ func TestReplayRejectsIncompleteRecordBeforeFinalSegment(t *testing.T) {
 		t.Fatal(err)
 	}
 	recoverEmptyWal(t, w)
-	if err := w.Write(OpSet, bytes.Repeat([]byte("a"), 700*1024)); err != nil {
+	if _, err := w.Write(OpSet, bytes.Repeat([]byte("a"), 700*1024)); err != nil {
 		t.Fatal(err)
 	}
-	if err := w.Write(OpSet, bytes.Repeat([]byte("b"), 700*1024)); err != nil {
+	if _, err := w.Write(OpSet, bytes.Repeat([]byte("b"), 700*1024)); err != nil {
 		t.Fatal(err)
 	}
 	closeWal(t, w)
@@ -620,7 +620,7 @@ func TestReplayRecoversTornTailInLastExistingSegment(t *testing.T) {
 		t.Fatal(err)
 	}
 	recoverEmptyWal(t, w)
-	if err := w.Write(OpSet, []byte("complete")); err != nil {
+	if _, err := w.Write(OpSet, []byte("complete")); err != nil {
 		t.Fatal(err)
 	}
 	closeWal(t, w)
@@ -696,7 +696,7 @@ func TestReplayRejectsCompleteRecordWithCorruptChecksum(t *testing.T) {
 		t.Fatal(err)
 	}
 	recoverEmptyWal(t, w)
-	if err := w.Write(OpSet, []byte("complete")); err != nil {
+	if _, err := w.Write(OpSet, []byte("complete")); err != nil {
 		t.Fatal(err)
 	}
 	closeWal(t, w)
@@ -802,7 +802,7 @@ func assertWalRejectsOperationsAsUnhealthy(t *testing.T, w *DurableWal) {
 	if w.state != walUnhealthy {
 		t.Fatalf("WAL state = %v, want unhealthy", w.state)
 	}
-	if err := w.Write(OpSet, []byte("after failure")); !errors.Is(err, ErrWalUnhealthy) {
+	if _, err := w.Write(OpSet, []byte("after failure")); !errors.Is(err, ErrWalUnhealthy) {
 		t.Fatalf("Write() after failure error = %v, want %v", err, ErrWalUnhealthy)
 	}
 	if _, err := w.Replay(func(WalEntry) error { return nil }); !errors.Is(err, ErrWalUnhealthy) {

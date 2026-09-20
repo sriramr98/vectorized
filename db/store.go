@@ -1,10 +1,22 @@
 // Package db defines the storage contract used by Vectorized's public API.
 package db
 
-type MemStore interface {
-	Set(key, value []byte) error
-	Get(key []byte) (value []byte, found bool)
-	Delete(key []byte) (deleted bool)
+type MemTable interface {
+	Apply(record Record) error
+	Delete(key string) (deleted bool)
 	// Clear clears all data from the store
-	Clear()
+	Clear() error
+}
+
+type ReadOnlyMemTable interface {
+	Get(key string) (r Record, found bool)
+	// GetAllSorted returns all records sorted by key
+	GetAllSorted() []Record
+}
+
+type MutableMemTable interface {
+	MemTable
+	ReadOnlyMemTable
+
+	Freeze() ReadOnlyMemTable
 }

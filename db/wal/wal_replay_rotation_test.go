@@ -27,7 +27,7 @@ func TestReplayReturnsEntriesAfterSegmentRotation(t *testing.T) {
 	}
 	writes := slices.Clone(want)
 	for _, entry := range writes {
-		if err := w.Write(entry.OpType, entry.Data); err != nil {
+		if _, err := w.Write(entry.OpType, entry.Data); err != nil {
 			t.Fatal(err)
 		}
 	}

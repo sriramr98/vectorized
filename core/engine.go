@@ -15,14 +15,14 @@ var ErrKeyNotFound = errors.New("key not found")
 
 // Engine is the co-ordinator which co-ordinates the storage mechanism
 type Engine struct {
-	store    db.MemStore
+	store    db.MutableMemTable
 	walStore wal.Wal
 	mu       sync.RWMutex
 	// reuse writeBuf during Set to reduce new buffer allocations
 	writeBuf *bytes.Buffer
 }
 
-func NewEngine(store db.MemStore, walStore wal.Wal) *Engine {
+func NewEngine(store db.MutableMemTable, walStore wal.Wal) *Engine {
 	return &Engine{
 		store:    store,
 		walStore: walStore,
@@ -41,11 +41,16 @@ func (e *Engine) Set(key []byte, value []byte) error {
 		return err
 	}
 
-	if err := e.walStore.Write(wal.OpSet, e.writeBuf.Bytes()); err != nil {
+	lsn, err := e.walStore.Write(wal.OpSet, e.writeBuf.Bytes())
+	if err != nil {
 		return err
 	}
 
-	if err := e.store.Set(key, value); err != nil {
+	if err := e.store.Apply(db.Record{
+		Key:  string(key),
+		Data: value,
+		Lsn:  lsn,
+	}); err != nil {
 		// wal record is written by this time. Wal is immutable, so the write is technically written.
 		// but since it's not commited, future reads fail. This makes the db in an inconsistent state just for this key
 		return fmt.Errorf("unable to set key %s but commited to wal", key)
@@ -59,18 +64,18 @@ func (e *Engine) Get(key []byte) (value []byte, err error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	val, found := e.store.Get(key)
+	val, found := e.store.Get(string(key))
 	if !found {
 		return []byte{}, ErrKeyNotFound
 	}
-	return val, nil
+	return val.Data, nil
 }
 
 func (e *Engine) Delete(key []byte) (deleted bool, err error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	_, found := e.store.Get(key)
+	_, found := e.store.Get(string(key))
 	if !found {
 		return false, nil
 	}
@@ -81,11 +86,11 @@ func (e *Engine) Delete(key []byte) (deleted bool, err error) {
 		return false, err
 	}
 
-	if err := e.walStore.Write(wal.OpDelete, buf.Bytes()); err != nil {
+	if _, err := e.walStore.Write(wal.OpDelete, buf.Bytes()); err != nil {
 		return false, err
 	}
 
-	return e.store.Delete(key), nil
+	return e.store.Delete(string(key)), nil
 
 }
 
@@ -112,7 +117,11 @@ func (e *Engine) Recover() (uint64, error) {
 			key := res[0]
 			value := res[1]
 
-			return newStore.Set(key, value)
+			return newStore.Apply(db.Record{
+				Key:  string(key),
+				Data: value,
+				Lsn:  we.LSN,
+			})
 
 		case wal.OpDelete:
 			res, err := utils.DecodeLengthEncodedBytes(we.Data)
@@ -124,7 +133,8 @@ func (e *Engine) Recover() (uint64, error) {
 				return fmt.Errorf("delete expects exactly one argument but got %d", len(res))
 			}
 
-			newStore.Delete(res[0])
+			//TODO: Do we need tombstone when we recover?
+			newStore.Delete(string(res[0]))
 			return nil
 		default:
 			return fmt.Errorf("unknown op type in wal %d", we.OpType)
