@@ -9,6 +9,7 @@ import (
 var (
 	ErrMemTableMaxSize             = errors.New("mem table has reached max size. freeze and create new mem table")
 	ErrSetNotAllowedInFrozen error = errors.New("unable to modify data in a frozen table")
+	ErrDataLSNStale                = errors.New("Apply received for an older LSN. Data is stale")
 )
 
 var DefaultMaxSizeBytes uint64 = 64 * 1024 * 1024 // 64MB
@@ -40,6 +41,7 @@ type BasicMemTable struct {
 	frozen           bool
 	currentSizeBytes uint64
 	maxSizeBytes     uint64
+	lastLSN          uint64
 }
 
 // NewMemoryStore creates an empty in-memory key-value store.
@@ -56,6 +58,10 @@ func (s *BasicMemTable) Apply(rec Record) error {
 		return ErrSetNotAllowedInFrozen
 	}
 
+	if rec.Lsn <= s.lastLSN {
+		return ErrDataLSNStale
+	}
+
 	old, exists := s.values[rec.Key]
 	val := rec.Clone()
 
@@ -65,15 +71,19 @@ func (s *BasicMemTable) Apply(rec Record) error {
 		if sizeAfterNewEntry > s.maxSizeBytes {
 			return ErrMemTableMaxSize
 		}
+
+		s.currentSizeBytes = sizeAfterNewEntry
 	} else {
 		if val.Len()+int(s.currentSizeBytes) > int(s.maxSizeBytes) {
 			return ErrMemTableMaxSize
 		}
+
+		s.currentSizeBytes += uint64(val.Len())
 	}
 
 	s.values[rec.Key] = &val
+	s.lastLSN = rec.Lsn
 
-	s.currentSizeBytes += uint64(val.Len())
 	return nil
 }
 

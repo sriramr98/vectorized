@@ -14,21 +14,21 @@ import (
 )
 
 type ServerConfig struct {
-	Port       int    `koanf:"port"`
-	WalDirPath string `koanf:"wal_dir_path"`
+	Port     int    `koanf:"port"`
+	DataPath string `koanf:"data_path"` // the path where wal and database pages are stored.
 }
 
 var defaultConfig = ServerConfig{
-	Port:       6380,
-	WalDirPath: defaultWalDir(),
+	Port:     6380,
+	DataPath: defaultDataDir(),
 }
 
 func LoadConfig(path string, logger *slog.Logger) (ServerConfig, error) {
 	k := koanf.New(".")
 	// load default values into koanf
 	if err := k.Load(confmap.Provider(map[string]any{
-		"port":         defaultConfig.Port,
-		"wal_dir_path": defaultConfig.WalDirPath,
+		"port":      defaultConfig.Port,
+		"data_path": defaultConfig.DataPath,
 	}, "."), nil); err != nil {
 		return ServerConfig{}, fmt.Errorf("load default config: %w", err)
 	}
@@ -100,12 +100,12 @@ func readConfig(k *koanf.Koanf) (ServerConfig, error) {
 	return cfg, nil
 }
 
-func defaultWalDir() string {
+func defaultDataDir() string {
 	home, err := getProjectHomePath()
 	if err != nil {
 		slog.Error("unable to get project home path for wal", "error", err)
 		panic(err)
 	}
 
-	return filepath.Join(home, "wal")
+	return filepath.Join(home, "data")
 }

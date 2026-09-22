@@ -7,6 +7,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"syscall"
 
@@ -53,7 +54,9 @@ func runServer(cmd *cobra.Command) error {
 	defer stop()
 
 	store := db.NewMemoryStore()
-	walStore, err := wal.NewWal(logger, serverConfig.WalDirPath)
+
+	walDir := filepath.Join(serverConfig.DataPath, "wal")
+	walStore, err := wal.NewWal(logger, walDir)
 	if err != nil {
 		return err
 	}

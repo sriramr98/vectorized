@@ -141,12 +141,11 @@ func (e *Engine) Recover() (uint64, error) {
 			if len(res) != 1 {
 				return fmt.Errorf("delete expects exactly one argument but got %d", len(res))
 			}
-			newStore.Apply(db.Record{
+			return newStore.Apply(db.Record{
 				Key:     string(res[0]),
 				Deleted: true,
 				Lsn:     we.LSN,
 			})
-			return nil
 		default:
 			return fmt.Errorf("unknown op type in wal %d", we.OpType)
 		}
