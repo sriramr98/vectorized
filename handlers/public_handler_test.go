@@ -112,5 +112,5 @@ func assertRequestResponse(t *testing.T, conn net.Conn, request, response string
 }
 
 func newTestEngine() *core.Engine {
-	return core.NewEngine(db.NewMemoryStore(), wal.NewInMemWal())
+	return core.NewEngine(func() db.MutableMemTable { return db.NewMemoryStore(db.DefaultMemStoreOpts()) }, wal.NewInMemWal())
 }

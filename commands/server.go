@@ -53,8 +53,6 @@ func runServer(cmd *cobra.Command) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	store := db.NewMemoryStore()
-
 	walDir := filepath.Join(serverConfig.DataPath, "wal")
 	walStore, err := wal.NewWal(logger, walDir)
 	if err != nil {
@@ -62,7 +60,10 @@ func runServer(cmd *cobra.Command) error {
 	}
 	defer walStore.Close()
 
-	engine := core.NewEngine(store, walStore)
+	engine := core.NewEngine(func() db.MutableMemTable {
+		return db.NewMemoryStore(db.DefaultMemStoreOpts())
+	}, walStore)
+
 	count, err := engine.Recover()
 	if err != nil {
 		logger.Error("unable to recover store from wal", "error", err)

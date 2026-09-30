@@ -9,8 +9,10 @@ import (
 
 func newTestMemTable(maxSizeBytes uint64) *BasicMemTable {
 	return &BasicMemTable{
-		values:       make(map[string]*Record),
-		maxSizeBytes: maxSizeBytes,
+		values: make(map[string]*Record),
+		opts: MemStoreOpts{
+			MaxSizeBytes: maxSizeBytes,
+		},
 	}
 }
 
@@ -47,7 +49,7 @@ func TestBasicMemTableDeleteHidesValueButRetainsTombstoneForFlush(t *testing.T) 
 	if err := table.Apply(Record{Key: "b", Deleted: true, Lsn: 8}); err != nil {
 		t.Fatal("Delete() = false, want true")
 	}
-	if _, found := table.Get("b"); found {
+	if val, _ := table.Get("b"); !val.Deleted {
 		t.Fatal("Get() found deleted value, want false")
 	}
 

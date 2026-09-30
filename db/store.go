@@ -19,3 +19,15 @@ type MutableMemTable interface {
 
 	Freeze() ReadOnlyMemTable
 }
+
+type MutableStoreCreator func() MutableMemTable
+
+type MemStoreOpts struct {
+	MaxSizeBytes uint64
+}
+
+func DefaultMemStoreOpts() MemStoreOpts {
+	return MemStoreOpts{
+		MaxSizeBytes: DefaultMaxSizeBytes,
+	}
+}

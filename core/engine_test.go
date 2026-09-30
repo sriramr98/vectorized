@@ -11,24 +11,22 @@ import (
 	"github.com/sriramr98/vectorized/utils"
 )
 
-func TestDeleteMissingKeyReturnsNotDeletedWithoutWritingWAL(t *testing.T) {
-	w := &engineTestWal{}
-	engine := NewEngine(db.NewMemoryStore(), w)
+func newBasicMemTable() db.MutableMemTable {
+	return newDefaultBasicMemTable()
+}
 
-	deleted, err := engine.Delete([]byte("missing"))
-	if err != nil {
-		t.Fatalf("Delete() error = %v, want nil", err)
-	}
-	if deleted {
-		t.Fatal("Delete() deleted = true, want false")
-	}
-	if len(w.writes) != 0 {
-		t.Fatalf("WAL writes = %d, want 0", len(w.writes))
+func newDefaultBasicMemTable() *db.BasicMemTable {
+	return db.NewMemoryStore(db.DefaultMemStoreOpts())
+}
+
+func newMemTableWithMaxSize(maxSizeBytes uint64) db.MutableStoreCreator {
+	return func() db.MutableMemTable {
+		return db.NewMemoryStore(db.MemStoreOpts{MaxSizeBytes: maxSizeBytes})
 	}
 }
 
 func TestRecoverRejectsSetWithExtraArguments(t *testing.T) {
-	store := db.NewMemoryStore()
+	store := newDefaultBasicMemTable()
 	if err := store.Apply(db.Record{
 		Key:  "existing",
 		Data: []byte("value"),
@@ -41,7 +39,7 @@ func TestRecoverRejectsSetWithExtraArguments(t *testing.T) {
 		OpType: wal.OpSet,
 		Data:   encodeEngineTestArgs(t, []byte("key"), []byte("value"), []byte("extra")),
 	}}}
-	engine := NewEngine(store, w)
+	engine := NewEngine(func() db.MutableMemTable { return store }, w)
 
 	if _, err := engine.Recover(); err == nil {
 		t.Fatal("Recover() error = nil, want SET arity error")
@@ -50,7 +48,7 @@ func TestRecoverRejectsSetWithExtraArguments(t *testing.T) {
 }
 
 func TestRecoverDoesNotPublishPartiallyRebuiltStore(t *testing.T) {
-	store := db.NewMemoryStore()
+	store := newDefaultBasicMemTable()
 	if err := store.Apply(db.Record{
 		Key:  "existing",
 		Data: []byte("value"),
@@ -62,7 +60,7 @@ func TestRecoverDoesNotPublishPartiallyRebuiltStore(t *testing.T) {
 		{LSN: 1, OpType: wal.OpSet, Data: encodeEngineTestArgs(t, []byte("new"), []byte("new-value"))},
 		{LSN: 2, OpType: wal.OpSet, Data: []byte("malformed")},
 	}}
-	engine := NewEngine(store, w)
+	engine := NewEngine(func() db.MutableMemTable { return store }, w)
 
 	if _, err := engine.Recover(); err == nil {
 		t.Fatal("Recover() error = nil, want malformed-record error")
@@ -74,7 +72,7 @@ func TestRecoverDoesNotPublishPartiallyRebuiltStore(t *testing.T) {
 }
 
 func TestRecoverPublishesCompletelyRebuiltStore(t *testing.T) {
-	store := db.NewMemoryStore()
+	store := newDefaultBasicMemTable()
 	if err := store.Apply(db.Record{
 		Key:  "stale",
 		Data: []byte("value"),
@@ -87,7 +85,7 @@ func TestRecoverPublishesCompletelyRebuiltStore(t *testing.T) {
 		OpType: wal.OpSet,
 		Data:   encodeEngineTestArgs(t, []byte("recovered"), []byte("value")),
 	}}}
-	engine := NewEngine(store, w)
+	engine := NewEngine(func() db.MutableMemTable { return newDefaultBasicMemTable() }, w)
 
 	count, err := engine.Recover()
 	if err != nil {
@@ -104,7 +102,7 @@ func TestRecoverPublishesCompletelyRebuiltStore(t *testing.T) {
 
 func TestSetResetsReusedEncodingBuffer(t *testing.T) {
 	w := &engineTestWal{}
-	engine := NewEngine(db.NewMemoryStore(), w)
+	engine := NewEngine(newBasicMemTable, w)
 
 	if err := engine.Set([]byte("first"), []byte("one")); err != nil {
 		t.Fatal(err)
@@ -132,7 +130,7 @@ func TestSetResetsReusedEncodingBuffer(t *testing.T) {
 }
 
 func TestSetExistingKeyRemainsUnchangedWhenWALWriteFails(t *testing.T) {
-	store := db.NewMemoryStore()
+	store := newDefaultBasicMemTable()
 	if err := store.Apply(db.Record{
 		Key:  "key",
 		Data: []byte("old"),
@@ -141,7 +139,7 @@ func TestSetExistingKeyRemainsUnchangedWhenWALWriteFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantErr := errors.New("WAL write failed")
-	engine := NewEngine(store, &engineTestWal{writeErr: wantErr})
+	engine := NewEngine(func() db.MutableMemTable { return store }, &engineTestWal{writeErr: wantErr})
 
 	if err := engine.Set([]byte("key"), []byte("new")); !errors.Is(err, wantErr) {
 		t.Fatalf("Set() error = %v, want %v", err, wantErr)
@@ -151,7 +149,7 @@ func TestSetExistingKeyRemainsUnchangedWhenWALWriteFails(t *testing.T) {
 
 func TestSetNewKeyRemainsAbsentWhenWALWriteFails(t *testing.T) {
 	wantErr := errors.New("WAL write failed")
-	engine := NewEngine(db.NewMemoryStore(), &engineTestWal{writeErr: wantErr})
+	engine := NewEngine(newBasicMemTable, &engineTestWal{writeErr: wantErr})
 
 	if err := engine.Set([]byte("key"), []byte("value")); !errors.Is(err, wantErr) {
 		t.Fatalf("Set() error = %v, want %v", err, wantErr)
@@ -163,25 +161,35 @@ func TestSetNewKeyRemainsAbsentWhenWALWriteFails(t *testing.T) {
 
 func TestSetWritesWALBeforeApplyingMemory(t *testing.T) {
 	var events []string
-	w := &orderedEngineTestWal{events: &events}
-	store := &orderedEngineTestStore{BasicMemTable: db.NewMemoryStore(), events: &events}
-	engine := NewEngine(store, w)
+	store := newDefaultBasicMemTable()
+	w := &orderedEngineTestWal{
+		events: &events,
+		wasApplied: func() bool {
+			_, found := store.Get("key")
+			return found
+		},
+	}
+	engine := NewEngine(func() db.MutableMemTable { return store }, w)
 
 	if err := engine.Set([]byte("key"), []byte("value")); err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"wal", "memory"}; !slices.Equal(events, want) {
-		t.Fatalf("mutation order = %v, want %v", events, want)
+	if w.appliedBeforeWAL {
+		t.Fatal("memory mutation happened before WAL write")
+	}
+	if want := []string{"wal"}; !slices.Equal(events, want) {
+		t.Fatalf("WAL events = %v, want %v", events, want)
+	}
+	if _, found := store.Get("key"); !found {
+		t.Fatal("memory mutation did not happen after WAL write")
 	}
 }
 
 func TestSetReportsMemoryFailureAfterWALWrite(t *testing.T) {
 	w := &engineTestWal{}
-	store := &failingSetEngineTestStore{
-		BasicMemTable: db.NewMemoryStore(),
-		err:           errors.New("memory write failed"),
-	}
-	engine := NewEngine(store, w)
+	store := newDefaultBasicMemTable()
+	store.Freeze()
+	engine := NewEngine(func() db.MutableMemTable { return store }, w)
 
 	if err := engine.Set([]byte("key"), []byte("value")); err == nil {
 		t.Fatal("Set() error = nil, want memory-application error")
@@ -194,13 +202,71 @@ func TestSetReportsMemoryFailureAfterWALWrite(t *testing.T) {
 	}
 }
 
+func TestSetRotatesFullMutableTableAndReadsFrozenTable(t *testing.T) {
+	engine := NewEngine(newMemTableWithMaxSize(11), &engineTestWal{})
+
+	if err := engine.Set([]byte("a"), []byte("1")); err != nil {
+		t.Fatalf("first Set() error = %v", err)
+	}
+	if err := engine.Set([]byte("b"), []byte("2")); err != nil {
+		t.Fatalf("second Set() error = %v", err)
+	}
+
+	if len(engine.frozenStores) != 1 {
+		t.Fatalf("frozen stores = %d, want 1", len(engine.frozenStores))
+	}
+	if got, found := engine.frozenStores[0].Get("a"); !found || string(got.Data) != "1" {
+		t.Fatalf("frozen Get(a) = (%+v, %v), want frozen value", got, found)
+	}
+	if got, found := engine.store.Get("b"); !found || string(got.Data) != "2" {
+		t.Fatalf("active Get(b) = (%+v, %v), want mutable value", got, found)
+	}
+
+	assertEngineValue(t, engine, "a", "1")
+	assertEngineValue(t, engine, "b", "2")
+}
+
+func TestDeleteAfterRotationWritesNewerTombstoneToActiveTable(t *testing.T) {
+	w := &engineTestWal{}
+	engine := NewEngine(newMemTableWithMaxSize(22), w)
+
+	for _, record := range []struct{ key, value string }{
+		{"a", "1"},
+		{"b", "2"},
+		{"c", "3"},
+	} {
+		if err := engine.Set([]byte(record.key), []byte(record.value)); err != nil {
+			t.Fatalf("Set(%q) error = %v", record.key, err)
+		}
+	}
+
+	deleted, err := engine.Delete([]byte("a"))
+	if err != nil || !deleted {
+		t.Fatalf("Delete() = (%v, %v), want (true, nil)", deleted, err)
+	}
+	if _, err := engine.Get([]byte("a")); !errors.Is(err, ErrKeyNotFound) {
+		t.Fatalf("Get(a) error = %v, want %v", err, ErrKeyNotFound)
+	}
+
+	var tombstone db.Record
+	for _, record := range engine.store.GetAllSorted() {
+		if record.Key == "a" {
+			tombstone = record
+			break
+		}
+	}
+	if !tombstone.Deleted || tombstone.Lsn != 4 {
+		t.Fatalf("active tombstone = %+v, want delete tombstone at LSN 4", tombstone)
+	}
+}
+
 func TestEngineRecoversFromDurableWALAfterReopen(t *testing.T) {
 	walDir := t.TempDir()
 	firstWal, err := wal.NewWal(nil, walDir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	firstEngine := NewEngine(db.NewMemoryStore(), firstWal)
+	firstEngine := NewEngine(newBasicMemTable, firstWal)
 	if _, err := firstEngine.Recover(); err != nil {
 		t.Fatal(err)
 	}
@@ -221,7 +287,7 @@ func TestEngineRecoversFromDurableWALAfterReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	secondEngine := NewEngine(db.NewMemoryStore(), secondWal)
+	secondEngine := NewEngine(newBasicMemTable, secondWal)
 	count, err := secondEngine.Recover()
 	if err != nil {
 		t.Fatal(err)
@@ -244,7 +310,7 @@ func TestEngineRecoversFromDurableWALAfterReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	thirdEngine := NewEngine(db.NewMemoryStore(), thirdWal)
+	thirdEngine := NewEngine(newBasicMemTable, thirdWal)
 	defer func() {
 		if err := thirdEngine.Close(); err != nil {
 			t.Errorf("close third engine: %v", err)
@@ -289,6 +355,7 @@ type engineTestWal struct {
 	writes        []engineTestWalWrite
 	replayEntries []wal.WalEntry
 	writeErr      error
+	nextLSN       uint64
 }
 
 func (w *engineTestWal) Write(op wal.OpType, data []byte) (uint64, error) {
@@ -296,7 +363,8 @@ func (w *engineTestWal) Write(op wal.OpType, data []byte) (uint64, error) {
 		return 0, w.writeErr
 	}
 	w.writes = append(w.writes, engineTestWalWrite{op: op, data: bytes.Clone(data)})
-	return 0, nil
+	w.nextLSN++
+	return w.nextLSN, nil
 }
 
 func (w *engineTestWal) Replay(fn func(wal.WalEntry) error) (uint64, error) {
@@ -311,32 +379,18 @@ func (w *engineTestWal) Replay(fn func(wal.WalEntry) error) (uint64, error) {
 func (w *engineTestWal) Close() error { return nil }
 
 type orderedEngineTestWal struct {
-	events *[]string
+	events           *[]string
+	wasApplied       func() bool
+	appliedBeforeWAL bool
+	nextLSN          uint64
 }
 
 func (w *orderedEngineTestWal) Write(wal.OpType, []byte) (uint64, error) {
+	w.appliedBeforeWAL = w.wasApplied()
 	*w.events = append(*w.events, "wal")
-	return 0, nil
+	w.nextLSN++
+	return w.nextLSN, nil
 }
 
 func (*orderedEngineTestWal) Replay(func(wal.WalEntry) error) (uint64, error) { return 0, nil }
 func (*orderedEngineTestWal) Close() error                                    { return nil }
-
-type orderedEngineTestStore struct {
-	*db.BasicMemTable
-	events *[]string
-}
-
-func (s *orderedEngineTestStore) Apply(rec db.Record) error {
-	*s.events = append(*s.events, "memory")
-	return s.BasicMemTable.Apply(rec)
-}
-
-type failingSetEngineTestStore struct {
-	*db.BasicMemTable
-	err error
-}
-
-func (s *failingSetEngineTestStore) Apply(rec db.Record) error {
-	return s.err
-}

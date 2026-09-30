@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/sriramr98/vectorized/db"
@@ -15,18 +16,21 @@ var ErrKeyNotFound = errors.New("key not found")
 
 // Engine is the co-ordinator which co-ordinates the storage mechanism
 type Engine struct {
-	store    db.MutableMemTable
-	walStore wal.Wal
-	mu       sync.RWMutex
+	store        db.MutableMemTable
+	storeCreator db.MutableStoreCreator
+	walStore     wal.Wal
+	mu           sync.RWMutex
 	// reuse writeBuf during Set to reduce new buffer allocations
-	writeBuf *bytes.Buffer
+	writeBuf     *bytes.Buffer
+	frozenStores []db.ReadOnlyMemTable
 }
 
-func NewEngine(store db.MutableMemTable, walStore wal.Wal) *Engine {
+func NewEngine(creator db.MutableStoreCreator, walStore wal.Wal) *Engine {
 	return &Engine{
-		store:    store,
-		walStore: walStore,
-		writeBuf: bytes.NewBuffer([]byte{}),
+		storeCreator: creator,
+		walStore:     walStore,
+		writeBuf:     bytes.NewBuffer([]byte{}),
+		store:        creator(),
 	}
 }
 
@@ -51,9 +55,22 @@ func (e *Engine) Set(key []byte, value []byte) error {
 		Data: value,
 		Lsn:  lsn,
 	}); err != nil {
-		// wal record is written by this time. Wal is immutable, so the write is technically written.
-		// but since it's not commited, future reads fail. This makes the db in an inconsistent state just for this key
-		return fmt.Errorf("unable to set key %s but commited to wal", key)
+
+		if errors.Is(err, db.ErrMemTableMaxSize) {
+			e.rotateMemTable()
+			err = e.store.Apply(db.Record{
+				Key:  string(key),
+				Data: value,
+				Lsn:  lsn,
+			})
+		}
+
+		if err != nil {
+			// wal record is written by this time. Wal is immutable, so the write is technically written.
+			// but since it's not commited, future reads fail. This makes the db in an inconsistent state just for this key
+			return fmt.Errorf("unable to set key %s but commited to wal", key)
+		}
+
 	}
 
 	return nil
@@ -66,19 +83,22 @@ func (e *Engine) Get(key []byte) (value []byte, err error) {
 
 	val, found := e.store.Get(string(key))
 	if !found {
+		val, found = e.searchFrozenStores(string(key))
+		if !found {
+			return []byte{}, ErrKeyNotFound
+		}
+	}
+
+	if val.Deleted {
 		return []byte{}, ErrKeyNotFound
 	}
+
 	return val.Data, nil
 }
 
 func (e *Engine) Delete(key []byte) (deleted bool, err error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-
-	_, found := e.store.Get(string(key))
-	if !found {
-		return false, nil
-	}
 
 	buf := bytes.NewBuffer([]byte{})
 
@@ -109,7 +129,7 @@ func (e *Engine) Recover() (uint64, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	newStore := db.NewMemoryStore()
+	newStore := e.storeCreator()
 
 	count, err := e.walStore.Replay(func(we wal.WalEntry) error {
 		switch we.OpType {
@@ -161,4 +181,31 @@ func (e *Engine) Recover() (uint64, error) {
 
 func (e *Engine) Close() error {
 	return e.walStore.Close()
+}
+
+func (e *Engine) rotateMemTable() {
+	frozen := e.store.Freeze()
+	e.frozenStores = append(e.frozenStores, frozen)
+
+	e.store = e.storeCreator()
+}
+
+func (e *Engine) searchFrozenStores(key string) (db.Record, bool) {
+
+	// loop store in reverse since most recent data is in latest store
+	for _, s := range slices.Backward(e.frozenStores) {
+
+		rec, found := s.Get(key)
+		if !found {
+			continue
+		}
+
+		if rec.Deleted {
+			return db.Record{}, false
+		}
+
+		return rec, true
+	}
+
+	return db.Record{}, false
 }

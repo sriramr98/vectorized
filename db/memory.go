@@ -40,13 +40,13 @@ type BasicMemTable struct {
 	values           map[string]*Record
 	frozen           bool
 	currentSizeBytes uint64
-	maxSizeBytes     uint64
 	lastLSN          uint64
+	opts             MemStoreOpts
 }
 
 // NewMemoryStore creates an empty in-memory key-value store.
-func NewMemoryStore() *BasicMemTable {
-	return &BasicMemTable{values: make(map[string]*Record), frozen: false, currentSizeBytes: 0, maxSizeBytes: DefaultMaxSizeBytes}
+func NewMemoryStore(opts MemStoreOpts) *BasicMemTable {
+	return &BasicMemTable{values: make(map[string]*Record), frozen: false, currentSizeBytes: 0, opts: opts, lastLSN: 0}
 }
 
 // Set stores value under key. errors if memtable is frozen
@@ -68,13 +68,13 @@ func (s *BasicMemTable) Apply(rec Record) error {
 	if exists {
 		sizeAfterNewEntry := s.currentSizeBytes - uint64(old.Len()) + uint64(val.Len()) // Current Total Size - Old Entry Size + New Entry Size ( becuase old entry is to be replaced with new entry in memtable )
 
-		if sizeAfterNewEntry > s.maxSizeBytes {
+		if sizeAfterNewEntry > s.opts.MaxSizeBytes {
 			return ErrMemTableMaxSize
 		}
 
 		s.currentSizeBytes = sizeAfterNewEntry
 	} else {
-		if val.Len()+int(s.currentSizeBytes) > int(s.maxSizeBytes) {
+		if val.Len()+int(s.currentSizeBytes) > int(s.opts.MaxSizeBytes) {
 			return ErrMemTableMaxSize
 		}
 
@@ -97,10 +97,6 @@ func (s *BasicMemTable) Get(key string) (Record, bool) {
 		return Record{}, false
 	}
 
-	if value.Deleted {
-		return Record{}, false
-	}
-
 	return value.Clone(), true
 }
 
@@ -113,6 +109,7 @@ func (s *BasicMemTable) Clear() error {
 	}
 
 	s.currentSizeBytes = 0
+	s.lastLSN = 0
 	clear(s.values)
 	return nil
 }
