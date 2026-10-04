@@ -74,7 +74,8 @@ func (s *BasicMemTable) Apply(rec Record) error {
 
 		s.currentSizeBytes = sizeAfterNewEntry
 	} else {
-		if val.Len()+int(s.currentSizeBytes) > int(s.opts.MaxSizeBytes) {
+		newTotalSizeWithCurrent := uint64(val.Len()) + s.currentSizeBytes
+		if newTotalSizeWithCurrent > s.opts.MaxSizeBytes {
 			return ErrMemTableMaxSize
 		}
 
