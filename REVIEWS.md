@@ -1,3 +1,7 @@
+> Historical review notes, not current implementation status or the roadmap.
+> Use [SERIES.md](SERIES.md) for authoritative behavior, stages, and agent rules.
+> Recheck source and tests before relying on the completion marks below.
+
 ## Important behavioral issues
 
   [x] Missing DEL behaves incorrectly for a Redis[]like API. Engine.Delete (core/engine.go:65) returns ErrKeyNotFound, causing the handler to return an internal error. It should normally return (false, nil), allowing
