@@ -5,6 +5,9 @@ type MemTable interface {
 	Apply(record Record) error
 	// Clear clears all data from the store
 	Clear() error
+
+	// CanAccomodate returns whether a the memtable can take this record in or error out based on size limitation
+	CanAccomodate(record Record) error
 }
 
 type ReadOnlyMemTable interface {

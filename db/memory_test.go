@@ -246,7 +246,7 @@ func TestBasicMemTableCapacityBoundaries(t *testing.T) {
 			record := Record{Key: "a", Data: []byte("123"), Lsn: 1} // 13 bytes
 			err := table.Apply(record)
 			if tc.wantCapacityError {
-				if !errors.Is(err, ErrMemTableMaxSize) {
+				if !errors.Is(err, ErrRecordTooLarge) {
 					t.Fatalf("Apply() = %v, want capacity error", err)
 				}
 				assertMemTableRecords(t, table, nil)
@@ -262,7 +262,7 @@ func TestBasicMemTableCapacityBoundaries(t *testing.T) {
 
 func TestBasicMemTableOversizedFirstRecordDoesNotConsumeLSN(t *testing.T) {
 	table := newTestMemTable(10)
-	if err := table.Apply(Record{Key: "a", Data: []byte("x"), Lsn: 7}); !errors.Is(err, ErrMemTableMaxSize) {
+	if err := table.Apply(Record{Key: "a", Data: []byte("x"), Lsn: 7}); !errors.Is(err, ErrRecordTooLarge) {
 		t.Fatalf("oversized first Apply() = %v, want capacity error", err)
 	}
 	assertMemTableRecords(t, table, nil)

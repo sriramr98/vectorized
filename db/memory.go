@@ -10,6 +10,8 @@ var (
 	ErrMemTableMaxSize             = errors.New("mem table has reached max size. freeze and create new mem table")
 	ErrSetNotAllowedInFrozen error = errors.New("unable to modify data in a frozen table")
 	ErrDataLSNStale                = errors.New("Apply received for an older LSN. Data is stale")
+	ErrRecordTooLarge              = errors.New("record is larger than max record size configured")
+	ErrRecordDoesntFit             = errors.New("record doens't fit the file")
 )
 
 var DefaultMaxSizeBytes uint64 = 64 * 1024 * 1024 // 64MB
@@ -62,25 +64,17 @@ func (s *BasicMemTable) Apply(rec Record) error {
 		return ErrDataLSNStale
 	}
 
-	old, exists := s.values[rec.Key]
-	val := rec.Clone()
-
-	if exists {
-		sizeAfterNewEntry := s.currentSizeBytes - uint64(old.Len()) + uint64(val.Len()) // Current Total Size - Old Entry Size + New Entry Size ( becuase old entry is to be replaced with new entry in memtable )
-
-		if sizeAfterNewEntry > s.opts.MaxSizeBytes {
-			return ErrMemTableMaxSize
-		}
-
-		s.currentSizeBytes = sizeAfterNewEntry
-	} else {
-		newTotalSizeWithCurrent := uint64(val.Len()) + s.currentSizeBytes
-		if newTotalSizeWithCurrent > s.opts.MaxSizeBytes {
-			return ErrMemTableMaxSize
-		}
-
-		s.currentSizeBytes += uint64(val.Len())
+	if uint64(rec.Len()) > s.opts.MaxSizeBytes {
+		return ErrRecordTooLarge
 	}
+
+	newTotalSize, ok := s.newTotalSizeLocked(rec)
+	if !ok || newTotalSize > s.opts.MaxSizeBytes {
+		return ErrMemTableMaxSize
+	}
+
+	val := rec.Clone()
+	s.currentSizeBytes = newTotalSize
 
 	s.values[rec.Key] = &val
 	s.lastLSN = rec.Lsn
@@ -142,6 +136,47 @@ func (s *BasicMemTable) GetAllSorted() []Record {
 
 	return values
 
+}
+
+func (s *BasicMemTable) CanAccomodate(rec Record) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	recLen := rec.Len()
+
+	if uint64(recLen) > s.opts.MaxSizeBytes {
+		return ErrRecordTooLarge
+	}
+
+	newTotalSize, ok := s.newTotalSizeLocked(rec)
+	does_fit := ok && newTotalSize <= s.opts.MaxSizeBytes
+
+	if !does_fit {
+		return ErrRecordDoesntFit
+	}
+
+	return nil
+}
+
+// newTotalSizeLocked computes the accounted size after applying rec. The caller
+// must hold at least s.mu.RLock because the calculation reads the table map and
+// currentSizeBytes.
+func (s *BasicMemTable) newTotalSizeLocked(rec Record) (uint64, bool) {
+	old, exists := s.values[rec.Key]
+	baseSize := s.currentSizeBytes
+	if exists {
+		oldSize := uint64(old.Len())
+		if oldSize > baseSize {
+			return 0, false
+		}
+		baseSize -= oldSize
+	}
+
+	recordSize := uint64(rec.Len())
+	if recordSize > ^uint64(0)-baseSize {
+		return 0, false
+	}
+	return baseSize + recordSize, true
 }
 
 func clone(value []byte) []byte {

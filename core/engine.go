@@ -13,6 +13,7 @@ import (
 )
 
 var ErrKeyNotFound = errors.New("key not found")
+var ErrEngineClosed = errors.New("engine already closed")
 
 // Engine is the co-ordinator which co-ordinates the storage mechanism
 type Engine struct {
@@ -23,6 +24,7 @@ type Engine struct {
 	// reuse writeBuf during Set to reduce new buffer allocations
 	writeBuf     *bytes.Buffer
 	frozenStores []db.ReadOnlyMemTable
+	closed       bool
 }
 
 func NewEngine(creator db.MutableStoreCreator, walStore wal.Wal) *Engine {
@@ -39,58 +41,39 @@ func (e *Engine) Set(key []byte, value []byte) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	e.writeBuf.Reset()
-
-	if err := utils.LengthEncodeBytes([][]byte{key, value}, e.writeBuf); err != nil {
-		return err
+	if e.closed {
+		return ErrEngineClosed
 	}
 
-	lsn, err := e.walStore.Write(wal.OpSet, e.writeBuf.Bytes())
-	if err != nil {
-		return err
-	}
-
-	if err := e.store.Apply(db.Record{
+	rec := db.Record{
 		Key:  string(key),
 		Data: value,
-		Lsn:  lsn,
-	}); err != nil {
 
-		if errors.Is(err, db.ErrMemTableMaxSize) {
-			e.rotateMemTable()
-			err = e.store.Apply(db.Record{
-				Key:  string(key),
-				Data: value,
-				Lsn:  lsn,
-			})
-		}
-
-		if err != nil {
-			// wal record is written by this time. Wal is immutable, so the write is technically written.
-			// but since it's not commited, future reads fail. This makes the db in an inconsistent state just for this key
-			return fmt.Errorf("unable to set key %s but commited to wal", key)
-		}
-
+		//temporaril set 0 for size calculation. Later set LSN from wal
+		Lsn: 0,
 	}
 
-	return nil
-
+	return e.apply(&rec, wal.OpSet, false)
 }
 
 func (e *Engine) Get(key []byte) (value []byte, err error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
+	if e.closed {
+		return nil, ErrEngineClosed
+	}
+
 	val, found := e.store.Get(string(key))
 	if !found {
 		val, found = e.searchFrozenStores(string(key))
 		if !found {
-			return []byte{}, ErrKeyNotFound
+			return nil, ErrKeyNotFound
 		}
 	}
 
 	if val.Deleted {
-		return []byte{}, ErrKeyNotFound
+		return nil, ErrKeyNotFound
 	}
 
 	return val.Data, nil
@@ -100,22 +83,17 @@ func (e *Engine) Delete(key []byte) (deleted bool, err error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	buf := bytes.NewBuffer([]byte{})
-
-	if err := utils.LengthEncodeBytes([][]byte{key}, buf); err != nil {
-		return false, err
+	if e.closed {
+		return false, ErrEngineClosed
 	}
 
-	lsn, err := e.walStore.Write(wal.OpDelete, buf.Bytes())
-	if err != nil {
-		return false, err
-	}
-
-	if err = e.store.Apply(db.Record{
+	rec := db.Record{
 		Key:     string(key),
 		Deleted: true,
-		Lsn:     lsn,
-	}); err != nil {
+		Lsn:     0, // Actual LSN set in e.apply
+	}
+
+	if err := e.apply(&rec, wal.OpDelete, false); err != nil {
 		return false, err
 	}
 
@@ -125,13 +103,17 @@ func (e *Engine) Delete(key []byte) (deleted bool, err error) {
 
 // Recover wipes the store and re-creates the store from walStore
 // returns the number of wal records processed and error if any
+//
+//	can be called on a closed engine to restart
 func (e *Engine) Recover() (uint64, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	newStore := e.storeCreator()
+	e.clear()
 
 	count, err := e.walStore.Replay(func(we wal.WalEntry) error {
+		var rec db.Record
+
 		switch we.OpType {
 		case wal.OpSet:
 			res, err := utils.DecodeLengthEncodedBytes(we.Data)
@@ -146,11 +128,11 @@ func (e *Engine) Recover() (uint64, error) {
 			key := res[0]
 			value := res[1]
 
-			return newStore.Apply(db.Record{
+			rec = db.Record{
 				Key:  string(key),
 				Data: value,
 				Lsn:  we.LSN,
-			})
+			}
 
 		case wal.OpDelete:
 			res, err := utils.DecodeLengthEncodedBytes(we.Data)
@@ -161,26 +143,37 @@ func (e *Engine) Recover() (uint64, error) {
 			if len(res) != 1 {
 				return fmt.Errorf("delete expects exactly one argument but got %d", len(res))
 			}
-			return newStore.Apply(db.Record{
+			rec = db.Record{
 				Key:     string(res[0]),
 				Deleted: true,
 				Lsn:     we.LSN,
-			})
+			}
 		default:
 			return fmt.Errorf("unknown op type in wal %d", we.OpType)
 		}
+
+		return e.apply(&rec, we.OpType, true)
 	})
 
-	if err == nil {
-		e.store.Clear()
-		e.store = newStore
-	}
+	// we open irrespecitve of error since Recover can be partially recovered state as well.
+	e.closed = false
 
 	return count, err
 }
 
 func (e *Engine) Close() error {
-	return e.walStore.Close()
+	if err := e.walStore.Close(); err != nil {
+		return err
+	}
+
+	e.closed = true
+	return nil
+}
+
+// thread-unsafe clear
+func (e *Engine) clear() error {
+	e.frozenStores = nil
+	return e.store.Clear()
 }
 
 func (e *Engine) rotateMemTable() {
@@ -208,4 +201,50 @@ func (e *Engine) searchFrozenStores(key string) (db.Record, bool) {
 	}
 
 	return db.Record{}, false
+}
+
+// apply internallly applies a DEL/SET operation in the engine. Expects caller to lock the engine properly.
+func (e *Engine) apply(rec *db.Record, op wal.OpType, skipWal bool) error {
+	e.writeBuf.Reset()
+
+	if err := e.store.CanAccomodate(*rec); err != nil {
+		if errors.Is(err, db.ErrRecordDoesntFit) {
+			e.rotateMemTable()
+		} else {
+			return err
+		}
+	}
+
+	if !skipWal {
+		lsn, err := e.writeToWal(*rec, op)
+		if err != nil {
+			return err
+		}
+
+		rec.Lsn = lsn
+	}
+
+	if err := e.store.Apply(*rec); err != nil {
+		// wal record is written by this time. Wal is immutable, so the write is technically written.
+		// but since it's not commited, future reads fail. This makes the db in an inconsistent state just for this key
+		return fmt.Errorf("unable to set key %s but commited to wal", rec.Key)
+
+	}
+
+	return nil
+}
+
+func (e *Engine) writeToWal(rec db.Record, op wal.OpType) (uint64, error) {
+	switch op {
+	case wal.OpDelete:
+		if err := utils.LengthEncodeBytes([][]byte{[]byte(rec.Key)}, e.writeBuf); err != nil {
+			return 0, err
+		}
+	case wal.OpSet:
+		if err := utils.LengthEncodeBytes([][]byte{[]byte(rec.Key), rec.Data}, e.writeBuf); err != nil {
+			return 0, err
+		}
+	}
+
+	return e.walStore.Write(op, e.writeBuf.Bytes())
 }
