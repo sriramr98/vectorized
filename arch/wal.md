@@ -1,12 +1,27 @@
 ## WAL Architecture
 
+This describes the WAL component. [SERIES.md](../SERIES.md) is authoritative for
+the implementation roadmap and cross-component behavior, including future
+manifest checkpoints and WAL reclamation.
+
 A write-ahead log (WAL) protects acknowledged writes from being lost if the database crashes before its in-memory state is flushed to the LSM tree.
 
 Writes are appended to the WAL before they are applied to memory or confirmed to the client. On restart, the WAL can be replayed to restore those writes.
 
 Each successful write is synchronized to disk before `Write` returns. If segment rotation, append, or synchronization fails, the WAL becomes unhealthy and rejects further writes and replay. It must be closed and reopened before use so startup recovery can validate and, when appropriate, repair the log.
 
-The WAL is the source of truth; memory, disk, and replicas are materialized views. If applying a committed WAL entry to any of them fails, the entry must not be removed or rolled back from the WAL. The system should retry application or replay it during recovery, and should not acknowledge the client until the required durability and application policy is satisfied. WAL operations should therefore be safe to replay and, ideally, idempotent.
+Before checkpointing, the WAL is the durable source of truth and memory is a
+materialized view. Once manifest-backed checkpoints and reclamation exist, the
+committed SST set plus the retained WAL suffix jointly represent authoritative
+state. An entry must not be removed to undo an application failure. The Engine
+must not acknowledge until its durability and application requirements hold.
+Current Engine M02 uses one shared apply path with WAL bypass during recovery,
+clears memory, and replays in place; failure can leave a readable prefix. The
+server refuses startup if Recover returns an error. Engine does not currently
+latch unhealthy after an apply failure; that limitation is documented in
+[Engine architecture](engine.md). M04 will skip checkpoint-covered entries and
+keep public admission closed until validation succeeds. Memtables still reject
+duplicate or out-of-order LSNs; replay must reset its destination before retry.
 
 ## WAL Layout
 
@@ -58,6 +73,13 @@ Closing the WAL synchronizes and closes the active segment, closes any other ope
 ## Recovery and Segment Rotation
 
 Recovery replays segments and entries present at startup in order and may succeed only once for an open WAL. The callback is responsible for rebuilding the store while replay simultaneously derives the latest LSN. Only after the complete scan and callback succeed does the WAL open an active segment and accept writes. A failed callback leaves the WAL in `recovery required` state so recovery can be retried from the beginning.
+
+Engine's in-place replay policy does not change this WAL lifecycle. A failed
+callback can leave Engine prefix records even though DurableWal returns a zero
+count and does not enable writes. Replay on a ready WAL is rejected, and Close
+is terminal for that WAL instance. Engine.Recover does not reopen it; ordinary
+restart constructs a new WAL and Engine. Do not use the permissive test fixture
+as evidence that Recover-after-Close works with DurableWal.
 
 A torn final record in the latest recovered segment is truncated back to the last complete record. An incomplete record in an older segment, a complete record with an invalid CRC, an invalid operation, or non-increasing LSN order is treated as corruption.
 

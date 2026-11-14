@@ -98,11 +98,13 @@ completion evidence.
 | Tests | `db/memory_test.go`, `core/engine_test.go`, WAL suites | Useful existing coverage; inspect and extend rather than rewrite wholesale. |
 | SST, manifest, vector search | Not present in the inspected source set | Future stages below, not existing guarantees. |
 
-Immediate gaps visible in source: DELETE does not share SET's rotation path and
-returns true even for missing keys; recovery builds only one capacity-limited
-table and does not replace the whole frozen-table set; post-WAL apply failure
-does not put the Engine into an explicit unhealthy state. These are starting
-points for expected-behavior tests, not authorization for agent fixes.
+At that historical baseline, DELETE did not share SET's rotation path and
+returned true even for missing keys; recovery built only one capacity-limited
+table and did not replace the whole frozen-table set; post-WAL apply failure
+did not put the Engine into an explicit unhealthy state. These were starting
+points for expected-behavior tests, not authorization for agent fixes. They are
+not the current gap list; see the 2026-10-23 review in section 8 and
+[Engine architecture](arch/engine.md) for current behavior and limitations.
 
 ### Scope and stop lines
 
@@ -162,19 +164,28 @@ These apply when the relevant feature is introduced.
 - WAL append assigns a globally increasing positive LSN and syncs before success.
   Gaps are allowed; strict increase, not consecutive numbering, is the contract.
   Never reuse an LSN after restart or checkpoint.
-- Validate -> append and sync -> apply -> acknowledge. Rotation retries the same
-  record with the same LSN and never appends it twice.
+- Validate capacity -> rotate memory if needed -> append and sync -> apply ->
+  acknowledge. Rotation before append is accepted, including when encoding or
+  append later fails, provided no rejected mutation becomes logically visible.
+  One successful mutation appends once and applies its assigned LSN. Recovery
+  uses the same capacity path with the recovered LSN and no new WAL append.
 - A WAL I/O/sync error can have an uncertain outcome: the record might survive
-  restart. A post-WAL apply failure also has an uncertain outcome. Reject further
-  normal reads and writes until close/reopen rather than serve divergent state.
-  Inspection/close remain available. Do not promise rollback or exactly-once
-  client retry semantics.
-- A validation rejection has no mutation effect and appends no WAL record.
+  restart. A post-WAL apply failure also has an uncertain outcome. Current M02
+  returns the error but has no Engine unhealthy latch; the caller must stop
+  normal service and reopen for reconciliation. WAL unhealthy/closed states
+  still reject writes themselves. M04/M08 introduce automatic rejection for
+  ambiguous storage publication. Do not promise rollback or exactly-once retries.
+- A validation rejection has no logical mutation effect and appends no WAL
+  record. Oversized records must fail before rotation; a later encoding or WAL
+  rejection may leave an extra frozen table under the accepted rotation policy.
 - Visibility uses the highest LSN for each key. Equal-LSN copies introduced by
   flush/recovery must agree in contents; conflicting copies are corruption.
-- Missing GET returns the existing missing-key error. DELETE of a missing or
-  already deleted key returns `false, nil` and appends nothing. DELETE of a live
-  key returns true only after recording a fresh tombstone.
+- Missing GET returns the existing missing-key error. DELETE unconditionally
+  writes a fresh tombstone, including for missing/already-deleted keys. Its bool
+  means the tombstone was successfully recorded/applied, not that a live key
+  existed. Repeated deletes consume WAL/memory and may rotate. The current RESP
+  adapter consequently returns `:1` for a successful DEL even on a missing key;
+  this is not Redis deletion-count compatibility.
 - Caller-owned and returned slices/maps must not alias mutable database state.
   Empty byte keys and non-nil empty values are valid at the KV API; nil KV input
   slices are invalid. Vector IDs have their own nonempty requirement.
@@ -187,8 +198,12 @@ These apply when the relevant feature is introduced.
 - Reject corrupt complete records, unsupported versions, invalid lengths and
   out-of-order LSNs. Only an incomplete final WAL record in the latest segment
   is an allowed torn tail. CRC errors are not silently treated as torn tails.
-- Recovery publishes complete state only after successful validation; a partially
-  replayed store must never become available to clients.
+- M02 recovery clears the current memory view and replays directly into it;
+  failed replay can leave a partial prefix visible to direct Engine callers.
+  This is an explicit simplification, not rollback or atomic replacement.
+  The server must refuse admission on recovery error, as `runServer` already
+  does. M04's manifest/SST recovery retains the stronger contract of no public
+  service until successful validation; partial memory is never a successful open.
 - The supported crash model is a single process on a local filesystem with
   functioning file/directory sync and same-filesystem atomic rename. State the
   tested OS/filesystem. A process-kill test does not prove survival of power loss
@@ -198,7 +213,9 @@ These apply when the relevant feature is introduced.
   accounting is a logical byte budget, not an exact Go heap measurement.
 - Only one database owner holds the directory lock. Close stops admission,
   waits for active work, releases resources, and is idempotent at the Engine API.
-  Operations after close return a defined closed error.
+  Operations after close return a defined closed error. Current M02 supports
+  tested sequential close behavior; concurrent Engine close coordination is a
+  known implementation gap (section 8), not established by the current race run.
 - Start with blocking maintenance under a lock where necessary. Do not introduce
   concurrency without tests for publication, cancellation, and resource lifetime.
 
@@ -218,7 +235,25 @@ These apply when the relevant feature is introduced.
 
 ## 4. Roadmap and video structure
 
-The table and chapter order below are both the implementation and teaching order.
+### Active application path (2026-11-13)
+
+The owner now prioritizes a demonstrable storage engine and implemented vector
+index for database-role applications. Follow [TASKS.md](TASKS.md) sequentially:
+bounded M02 lifecycle work -> M03 -> M04 -> a full-scan M07 slice -> single-
+collection squared-L2 vector storage (M09/M10 slices) -> M11 -> M13/M14 -> M15 ->
+application evidence (M17 slice). Teaching and implementation order remain equal.
+
+Defer M02-S1's skip list, M12 metadata filtering, I01/I02 secondary indexes, and
+maintenance until after that checkpoint. Keep the map-backed memtable and rebuild
+HNSW on startup. Existing work remains included. Partial-stage slices do not
+claim the full collection/metric/filter or maintained-release contracts are done.
+The broader table and chapters below retain the longer-term curriculum; this
+active path supersedes their ordering where they conflict. Preserve durability,
+version/tombstone correctness, bounded decoding, and the existing ANN release
+target; no performance tuning is required to advance through the first versions.
+
+The table and chapter order below describe the broader curriculum; the active
+application path above takes priority for current implementation and teaching.
 Existing M IDs and test IDs remain stable for references; their numeric order is
 no longer the schedule. I IDs add query-index chapters without renaming existing
 work. Each row may span several focused commits/videos. Optional work is skipped
@@ -228,7 +263,7 @@ unless selected, with its limitation documented.
 | --- | --- | --- | --- | --- |
 | 1 | M00 | What do the existing TCP/RESP and WAL layers guarantee? | Existing code | Included; audit needed |
 | 2 | M01 | Can a simple memtable safely apply, freeze, and export records? | M00 | Included; current tests pass, completion evidence pending |
-| 3 | M02 | Do rotation, deletes, and recovery preserve one logical view? Finish with the M02-S1 skip-list replacement. | M01 | Included; partial; skip list planned |
+| 3 | M02 | Do rotation, deletes, and recovery preserve one logical view? Finish with the M02-S1 skip-list replacement. | M01 | Existing suites pass (2026-10-23); review limits remain; skip list planned |
 | 4 | M03 | Can we write and read a simple sorted file? | M02 | Planned |
 | 5 | M04 | Can we flush, read from disk, and restart safely? | M03 | Planned; first disk cycle |
 | 6 | M07 | Can we scan current records across unmerged storage layers? | M04 | Planned |
@@ -265,9 +300,11 @@ it or add another WAL policy before memtables work end to end.
 
 **Behavior and implementation scope**
 
-Document startup as open/locked -> recovery required -> ready -> unhealthy or
+Document WAL startup as open/locked -> recovery required -> ready -> unhealthy or
 closed. Replay succeeds once per WAL instance; retrying a failed callback starts
-from the beginning into fresh temporary state. Keep per-write sync as the only
+from the beginning. The callback owns resetting its destination; current Engine
+recovery clears and replays in place rather than publishing staging state.
+Keep per-write sync as the only
 durability mode in the main path. Retain the existing 18-byte V1 WAL header and
 the distinct argument framing in `utils/encoding.go`; do not conflate them.
 
@@ -313,6 +350,11 @@ carry no value bytes. Replacement subtracts the old size before adding the new.
 A nonzero maximum is required; exact capacity fits. Oversized records are
 rejected, including in an empty table. Engine prevalidation comes in M02.
 
+Current capacity preflight is `CanAccomodate(Record) error`: nil means it fits,
+`ErrRecordDoesntFit` means rotate, and `ErrRecordTooLarge` means reject because
+even an empty table cannot fit it. Apply independently rejects total-capacity
+overflow with `ErrMemTableMaxSize` and oversized records with `ErrRecordTooLarge`.
+
 Freeze is idempotent and leaves reads/export available. Apply and Clear on a
 frozen table fail. Clear on a mutable table resets data, size, and LSN.
 Get/export return independent records, sorted export is bytewise by key, and
@@ -344,42 +386,63 @@ lock-free access, and further memtable tuning.
 
 **Behavior and implementation scope**
 
-Use one mutation path for SET and live-key DELETE. Before append, ensure the
-record can fit an empty table and satisfies the WAL payload limit. If the
-current table rejects capacity, freeze it, create a fresh table, apply the same
-WAL-assigned record once, and retain the frozen table for reads.
+Use one mutation path for SET and unconditional DELETE. Before rotation/append,
+ensure the record can fit an empty table. `CanAccomodate` distinguishes oversized
+rejection from a full current table. If the current table lacks room, freeze it
+and create a fresh table before appending; retain the frozen table for reads even
+if append fails. Encode SET as key/value and DELETE as key-only with the matching
+WAL op, append once, then apply its assigned LSN. WAL also enforces its payload
+limit; a rejected encoding/append must not publish the requested logical mutation.
 
 Read active then frozen newest-to-oldest. Across future SSTs, explicitly compare
-versions where layer ordering alone is insufficient. DELETE checks visible state
-under the mutation lock and emits a new tombstone only for a live key.
+versions where layer ordering alone is insufficient. DELETE does not check
+existence; it appends/applies a new tombstone and returns true on success. Reads
+respect it immediately. Compaction later reconciles redundant versions.
 
-Recovery uses fresh active/frozen state and the same capacity transition without
-writing new WAL records. Publish the entire replacement state after success.
+Owner-approved simplification: Recover discards frozen references, clears the
+current mutable table, and replays into the Engine through `apply(..., skipWal=true)`.
+It uses the same capacity transition without writing new WAL records, preserving
+recovered LSNs. On error, the old view is not restored and replayed prefix records
+may remain readable. The current implementation sets `closed=false` on return,
+including on error; this does not imply recovery succeeded or WAL permits writes.
 For this intermediate stage recovery may retain multiple frozen tables in RAM;
-M04/M08 remove that unbounded-history limitation. Recovery is startup-only in the
-public lifecycle. Test failure isolation through a controlled recovery fixture,
-not by introducing live recovery as a product feature.
+M04/M08 remove that unbounded-history limitation. Normal durable startup still
+requires a newly opened WAL, successful Recover, then client admission. A caller
+must inspect the error. `runServer` aborts before listening on recovery failure.
+DurableWal permits one successful Replay per instance and rejects replay after
+Close. Recover alone cannot restart a closed durable Engine or safely refresh an
+already-recovered one: it clears memory before Replay rejects the call. Restart
+uses a newly opened WAL and a new Engine. See `arch/engine.md` for this distinction
+and remaining lifecycle limits.
 
-If apply fails after WAL success for anything other than a handled rotation,
-mark the Engine unhealthy. A validation failure leaves it healthy. Recovering
-with a smaller configured record limit must fail clearly rather than drop data.
+If apply fails after WAL success, return an uncertain-outcome error; reopen can
+replay the durable record. The removed unhealthy-latch test is no longer an M02
+acceptance requirement; no automatic Engine fail-stop is currently implemented.
+Recovering with a smaller record limit returns an error, potentially after
+building a readable prefix. Do not describe that prefix as a successful database
+open. M04 keeps public admission closed until its recovery succeeds.
 
 **Acceptance tests**
 
 - M02-T1: SET causing rotation remains visible; older frozen keys are readable;
   newest overwrite wins across at least three tables.
 - M02-T2: DELETE of a frozen key, DELETE that itself triggers rotation, repeated
-  DELETE, absent DELETE, and reinsert-after-delete have correct results.
+  DELETE, absent DELETE, and reinsert-after-delete have correct results. Every
+  successful DELETE writes a fresh tombstone, including absent/repeated deletes.
 - M02-T3: a frozen tombstone masks an older frozen value; later SST integration
   repeats this case against disk.
 - M02-T4: capacity rotation makes exactly one WAL append and preserves its LSN;
   oversized input appends nothing and creates no cascade of empty tables.
-- M02-T5: append failure leaves state unchanged; successful append followed by
-  unexpected apply failure rejects later normal operations; reopen replays it.
+- M02-T5: append failure preserves logical contents and publishes no requested
+  record, but may leave an extra frozen table. Successful append followed by apply
+  failure reports an error; a new durable Engine recovers that record on reopen.
+  Automatic rejection of subsequent operations is not claimed at M02.
 - M02-T6: replay larger than one memtable, including overwrites and deletes,
-  reconstructs the same view; failed replay publishes none of its partial state.
-- M02-T7: successful replacement removes obsolete frozen state; close racing
-  with writes has defined outcomes, repeated close succeeds, post-close calls fail.
+  reconstructs the same view without extra WAL writes. Failed replay returns an
+  error and may retain a readable prefix; the server must not start from it.
+- M02-T7: successful rebuild removes obsolete frozen state; sequential repeated
+  close succeeds and post-close SET/GET/DELETE fail. Concurrent close safety and
+  closed-instance restart are not established by the current tests.
 
 **Video proof:** use a tiny budget to show three generations and one tombstone.
 Restart with history bigger than the budget and obtain identical reads.
@@ -1360,42 +1423,70 @@ search. Implementation and video order are identical.
 
 ### Current chapter: M02, Engine integration
 
-Checked on 2026-10-16, branch `feat/lsm`, base commit `c7a2e43` with existing
-uncommitted changes. This evidence applies to that working tree, not solely to
-the commit. Command:
+The 2026-10-16/18 failing-test counts are historical and are superseded by this
+review on 2026-10-23: branch `feat/lsm`, base commit `2cf676e`, with owner changes
+to Engine, capacity preflight, and tests. Evidence applies to that working tree.
+
+**Accepted behavior changes and implementation**
+
+- SET/DELETE share `apply`; normal calls append once, recovery skips append and
+  preserves recovered LSNs. Capacity preflight now distinguishes oversized
+  records from records that require rotation.
+- DELETE always writes a tombstone. Rotation before append is accepted even if
+  append fails; current tests allow the retained extra frozen table.
+- Recover clears and replays in place; failed replay may retain a readable
+  prefix. Old-state preservation and atomic replacement are no longer M02
+  requirements. The server aborts startup on recovery error.
+- Tests requiring recovery failure isolation, repeated-delete no-ops, and
+  automatic post-WAL-failure Engine shutdown were removed. Their absence is
+  recorded explicitly; no new guarantee follows from a green remaining suite.
+- Sequential closed-state checks and new-instance durable restart pass. A
+  closed-instance restart is not supported by the unchanged DurableWal lifecycle.
+
+**Validation performed**
 
 ```sh
-GOCACHE=/private/tmp/vectorized-gocache go test ./db ./core ./db/wal
+GOCACHE=/private/tmp/vectorized-gocache go test ./...
+GOCACHE=/private/tmp/vectorized-gocache go test -race ./core ./db
+go test -count=1 ./...
 ```
 
-Result: `db` and `db/wal` pass; `core` fails eight named tests below. No build or
-sandbox failure occurred. No race/full-repository suite or recorded demo was run
-for this update. M01's existing suite is green; that alone does not certify all
-stage completion evidence. Do not add memtable optimization work before M03.
+The first run passes all packages except `transport/tcpserver`, whose listener
+cannot bind in the sandbox (`operation not permitted`). The focused race run
+passes. The final uncached full-suite run outside the sandbox passes all packages,
+including TCP. No full-repository race run, crash harness, or recording demo was
+performed. Documentation whitespace and internal links are checked separately.
 
-| Remaining M02 slice | Current evidence | What closes the slice |
-| --- | --- | --- |
-| Prevalidate and rotate mutations | `TestEngineOversizedSetFailsBeforeWALAppend`; `TestEngineDeleteRotatesAtCapacityAndFrozenTombstoneMasksOlderValue` fail | Reject records that cannot fit an empty table before WAL append or rotation. SET and live DELETE share the rotation/apply behavior; append once and preserve LSN. Missing/repeated DELETE returns false with no append. |
-| Recover the complete table set | `TestEngineRecoverySpansMultipleMemTables`; `TestEngineRecoversMultiTableHistoryFromDurableWAL`; `TestEngineFailedRecoveryAfterRotationDoesNotPublishPartialState`; `TestEngineSuccessfulRecoveryDiscardsPreviousFrozenStores` fail | Replay into fresh active/frozen tables, rotate as needed without WAL writes, and publish the whole replacement only after success. |
-| Unhealthy and closed states | `TestEngineRejectsNormalOperationsAfterPostWALApplyFailure`; `TestEngineCloseIsIdempotentAndRejectsLaterOperations` fail | Stop normal operations after uncertain authoritative writes; close safely and idempotently, rejecting subsequent operations. |
+**Review limits, not silently completed work**
 
-Some tests stop at their first failed assertion. For example, the delete-rotation
-test has later repeated-delete checks that this run never reached. Eight failing
-test functions is not a complete count of missing behaviors. Review the full
-M02-T1 through T7 contract and existing coverage as each slice becomes green.
+- Recover clears before Replay validates WAL lifecycle. Calling it twice after
+  success, or after Close, can erase memory before WAL rejects replay. Its
+  restart comment overstates what a closed DurableWal can do.
+- Recover ignores Clear's error; a frozen active table need not reset successfully.
+- Close writes `closed` without the Engine mutex. Concurrent close is not covered
+  by the passing sequential close test or the current race workload.
+- There is no Engine unhealthy latch after a post-WAL apply failure. The record
+  can be missing in memory yet reappear on restart. Existing handler errors do
+  not automatically stop service.
+- New partial-prefix visibility and unconditional absent/repeated DELETE policy
+  lack dedicated replacement coverage; successful replay tests are not evidence
+  of recovery-error or closed-instance behavior.
 
-Suggested next owner step: oversized-record prevalidation, then shared SET/DELETE
-rotation and missing/repeated-delete behavior. Agents can explain the existing
-tests and add only missing coverage for that agreed slice; the owner implements.
-Next handle whole-state recovery and then unhealthy/closed lifecycle.
+See [Engine architecture](arch/engine.md) for the call path and precise limits.
+Production code and tests were reviewed and run, not edited in this update.
 
 ### Added scope on 2026-10-18
 
-M02-S1 is the owner's requested skip-list replacement before SST work. The test
-results above predate that change; no skip-list implementation or tests were
-added by this roadmap edit. Preserve the existing map version as covered history.
+M02-S1 is the owner's requested skip-list replacement before SST work. It remains
+planned, with the existing map version preserved as covered history. No skip-list
+implementation or tests were added during this documentation review.
 
-**Current chapter exit:** all M02 contracts and M02-S1 checks pass; run
+**Next planned substep:** M02-S1 after disposition of the review limits above.
+Do not reinstate discarded atomic-recovery or existence-check DELETE policies
+as hidden prerequisites. Current test success does not establish lifecycle claims
+that the real WAL rejects. The owner chooses the scope of the next code slice.
+
+**Current chapter exit:** accepted M02 contracts and M02-S1 checks pass; run
 the relevant integration/race checks and a tiny-table demo that writes across
 three generations, overwrites/deletes/reinserts, closes, reopens, and obtains
 the same live view from the real WAL. Fix correctness failures within this scope.

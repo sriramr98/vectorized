@@ -170,6 +170,53 @@ func TestSetReportsMemoryFailureAfterWALWrite(t *testing.T) {
 	}
 }
 
+func TestEnginePostWALApplyFailurePreservesReadsAndRejectsWrites(t *testing.T) {
+	store := newDefaultBasicMemTable()
+	w := &engineTestWal{}
+	engine := NewEngine(func() db.MutableMemTable { return store }, w)
+	defer engine.Close()
+
+	if err := engine.Set([]byte("existing"), []byte("value")); err != nil {
+		t.Fatal(err)
+	}
+	assertEngineValue(t, engine, "existing", "value")
+
+	// Inject an invalid assigned LSN at the WAL seam. The append succeeds,
+	// but the real mutable memtable rejects the duplicate LSN during Apply.
+	w.nextLSN = 0
+	if err := engine.Set([]byte("uncertain"), []byte("value")); err == nil {
+		t.Fatal("Set() with duplicate WAL LSN = nil, want apply failure")
+	}
+	if len(w.writes) != 2 {
+		t.Fatalf("WAL writes = %d, want initial write and WAL-accepted failed apply", len(w.writes))
+	}
+	if _, found := store.Get("uncertain"); found {
+		t.Fatal("failed Apply published the uncertain record")
+	}
+
+	if value, err := engine.Get([]byte("existing")); err != nil || string(value) != "value" {
+		t.Errorf("Get(existing) after uncertain write = (%q, %v), want (value, nil)", value, err)
+	}
+	if _, err := engine.Get([]byte("uncertain")); !errors.Is(err, ErrKeyNotFound) {
+		t.Errorf("Get(uncertain) after failed Apply = %v, want missing", err)
+	}
+	if err := engine.Set([]byte("later"), []byte("value")); !errors.Is(err, ErrEngineUnhealthy) {
+		t.Errorf("Set() after uncertain write = %v, want unhealthy error", err)
+	}
+	if deleted, err := engine.Delete([]byte("existing")); !errors.Is(err, ErrEngineUnhealthy) || deleted {
+		t.Errorf("Delete() after uncertain write = (%v, %v), want (false, unhealthy error)", deleted, err)
+	}
+	if len(w.writes) != 2 {
+		t.Errorf("WAL writes after rejected operations = %d, want 2", len(w.writes))
+	}
+	if rec, found := store.Get("existing"); !found || rec.Deleted || string(rec.Data) != "value" {
+		t.Errorf("existing record changed after rejected operations: (%+v, %v)", rec, found)
+	}
+	if _, found := store.Get("later"); found {
+		t.Error("rejected Set published a new record")
+	}
+}
+
 func TestSetRotatesFullMutableTableAndReadsFrozenTable(t *testing.T) {
 	engine := NewEngine(newMemTableWithMaxSize(11), &engineTestWal{})
 
@@ -380,11 +427,11 @@ func TestEnginePostWALApplyFailureIsRecoveredAfterReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	frozen := newDefaultBasicMemTable()
-	frozen.Freeze()
 	first := NewEngine(func() db.MutableMemTable { return frozen }, firstWal)
 	if _, err := first.Recover(); err != nil {
 		t.Fatal(err)
 	}
+	frozen.Freeze()
 	if err := first.Set([]byte("committed-to-wal"), []byte("value")); err == nil {
 		t.Fatal("Set() with frozen active table = nil, want apply failure")
 	}

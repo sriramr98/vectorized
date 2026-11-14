@@ -14,6 +14,15 @@ import (
 
 var ErrKeyNotFound = errors.New("key not found")
 var ErrEngineClosed = errors.New("engine already closed")
+var ErrEngineUnhealthy = errors.New("engine is unhealthy and inconsistent. Please restart the server")
+
+type EngineState int
+
+const (
+	Ready EngineState = iota
+	Closed
+	Unhealthy // this state occurs when wal write goes through but memtable writes fail which leaves the DB in an inconsistent state, so we stop accepting writes until server restarts and inconsistency resolved.
+)
 
 // Engine is the co-ordinator which co-ordinates the storage mechanism
 type Engine struct {
@@ -24,7 +33,7 @@ type Engine struct {
 	// reuse writeBuf during Set to reduce new buffer allocations
 	writeBuf     *bytes.Buffer
 	frozenStores []db.ReadOnlyMemTable
-	closed       bool
+	state        EngineState
 }
 
 func NewEngine(creator db.MutableStoreCreator, walStore wal.Wal) *Engine {
@@ -41,10 +50,6 @@ func (e *Engine) Set(key []byte, value []byte) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	if e.closed {
-		return ErrEngineClosed
-	}
-
 	rec := db.Record{
 		Key:  string(key),
 		Data: value,
@@ -60,7 +65,7 @@ func (e *Engine) Get(key []byte) (value []byte, err error) {
 	e.mu.RLock()
 	defer e.mu.RUnlock()
 
-	if e.closed {
+	if e.state == Closed {
 		return nil, ErrEngineClosed
 	}
 
@@ -83,10 +88,6 @@ func (e *Engine) Delete(key []byte) (deleted bool, err error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	if e.closed {
-		return false, ErrEngineClosed
-	}
-
 	rec := db.Record{
 		Key:     string(key),
 		Deleted: true,
@@ -98,7 +99,6 @@ func (e *Engine) Delete(key []byte) (deleted bool, err error) {
 	}
 
 	return true, nil
-
 }
 
 // Recover wipes the store and re-creates the store from walStore
@@ -158,7 +158,7 @@ func (e *Engine) Recover() (uint64, error) {
 	})
 
 	// we open irrespecitve of error since Recover can be partially recovered state as well.
-	e.closed = false
+	e.state = Ready
 
 	return count, err
 }
@@ -171,7 +171,7 @@ func (e *Engine) Close() error {
 		return err
 	}
 
-	e.closed = true
+	e.state = Closed
 	return nil
 }
 
@@ -210,6 +210,14 @@ func (e *Engine) searchFrozenStores(key string) (db.Record, bool) {
 
 // apply internallly applies a DEL/SET operation in the engine. Expects caller to lock the engine properly.
 func (e *Engine) apply(rec *db.Record, op wal.OpType, skipWal bool) error {
+	if e.state == Closed {
+		return ErrEngineClosed
+	}
+
+	if e.state == Unhealthy {
+		return ErrEngineUnhealthy
+	}
+
 	e.writeBuf.Reset()
 
 	if err := e.store.CanAccomodate(*rec); err != nil {
@@ -232,8 +240,8 @@ func (e *Engine) apply(rec *db.Record, op wal.OpType, skipWal bool) error {
 	if err := e.store.Apply(*rec); err != nil {
 		// wal record is written by this time. Wal is immutable, so the write is technically written.
 		// but since it's not commited, future reads fail. This makes the db in an inconsistent state just for this key
+		e.state = Unhealthy
 		return fmt.Errorf("unable to set key %s but commited to wal", rec.Key)
-
 	}
 
 	return nil

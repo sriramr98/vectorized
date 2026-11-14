@@ -2,6 +2,15 @@
 > Use [SERIES.md](SERIES.md) for authoritative behavior, stages, and agent rules.
 > Recheck source and tests before relying on the completion marks below.
 
+> 2026-10-23 policy update: the old missing-DEL and atomic-recovery recommendations
+> below are superseded. DELETE now writes an unconditional tombstone; its bool
+> reports successful recording/application. Recovery clears/replays in place,
+> may retain a readable prefix on error, and server startup aborts on that error.
+> Rotation before a failed append is accepted if logical contents are preserved.
+> Removed isolation/unhealthy tests no longer establish those guarantees. See
+> [current Engine behavior and limitations](arch/engine.md) and the SERIES ledger;
+> historical completion marks are preserved as history.
+
 ## Important behavioral issues
 
   [x] Missing DEL behaves incorrectly for a Redis[]like API. Engine.Delete (core/engine.go:65) returns ErrKeyNotFound, causing the handler to return an internal error. It should normally return (false, nil), allowing
