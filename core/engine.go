@@ -109,7 +109,9 @@ func (e *Engine) Recover() (uint64, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	e.clear()
+	if err := e.clear(); err != nil {
+		return 0, err
+	}
 
 	count, err := e.walStore.Replay(func(we wal.WalEntry) error {
 		var rec db.Record
@@ -162,6 +164,9 @@ func (e *Engine) Recover() (uint64, error) {
 }
 
 func (e *Engine) Close() error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
 	if err := e.walStore.Close(); err != nil {
 		return err
 	}
