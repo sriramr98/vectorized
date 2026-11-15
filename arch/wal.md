@@ -1,100 +1,93 @@
-## WAL Architecture
+# WAL architecture and format
 
-This describes the WAL component. [SERIES.md](../SERIES.md) is authoritative for
-the implementation roadmap and cross-component behavior, including future
-manifest checkpoints and WAL reclamation.
+The write-ahead log (WAL) persists ordered mutations so the Engine can rebuild
+memory after restart. Use this page to understand durability, record encoding,
+segment rotation, and replay. The implementation starts in
+[db/wal/wal.go](../db/wal/wal.go).
 
-A write-ahead log (WAL) protects acknowledged writes from being lost if the database crashes before its in-memory state is flushed to the LSM tree.
+## Append and durability
 
-Writes are appended to the WAL before they are applied to memory or confirmed to the client. On restart, the WAL can be replayed to restore those writes.
+The Engine appends a mutation before applying it to memory. Each successful
+WAL Write assigns an increasing positive log sequence number (LSN), appends one
+complete record, and synchronizes the active file before returning.
 
-Each successful write is synchronized to disk before `Write` returns. If segment rotation, append, or synchronization fails, the WAL becomes unhealthy and rejects further writes and replay. It must be closed and reopened before use so startup recovery can validate and, when appropriate, repair the log.
+A short write, append failure, sync failure, or segment-rotation failure marks the
+WAL unhealthy. Further writes and replay are rejected until a new WAL instance
+is opened. A failed write may still be present after restart; callers cannot
+interpret an error as proof that the record was not persisted.
 
-Before checkpointing, the WAL is the durable source of truth and memory is a
-materialized view. Once manifest-backed checkpoints and reclamation exist, the
-committed SST set plus the retained WAL suffix jointly represent authoritative
-state. An entry must not be removed to undo an application failure. The Engine
-must not acknowledge until its durability and application requirements hold.
-Current Engine M02 uses one shared apply path with WAL bypass during recovery,
-clears memory, and replays in place; failure can leave a readable prefix. The
-server refuses startup if Recover returns an error. Engine does not currently
-latch unhealthy after an apply failure; that limitation is documented in
-[Engine architecture](engine.md). M04 will skip checkpoint-covered entries and
-keep public admission closed until validation succeeds. Memtables still reject
-duplicate or out-of-order LSNs; replay must reset its destination before retry.
+The WAL provides ordered durable records. The [Engine](engine.md) owns memory
+application, read visibility, and client acknowledgment.
 
-## WAL Layout
+## Directory and segment files
 
-The WAL is a directory containing ordered segment files. Each segment is named `wal_segment__<id>`, where `id` is a non-negative integer. Segment IDs define the order of the segments.
+A WAL directory contains segment files named `wal_segment__<id>` and a
+`wal.lock` file. The lock is exclusive and non-blocking, so a second owner of the
+same directory fails promptly. The lock remains held throughout the WAL lifetime.
 
-The directory also contains `wal.lock`, which is used to prevent multiple database processes from operating on the same WAL directory.
+Segments are replayed in numeric ID order. A new directory starts with segment 1.
+Only the active segment stays open for append; historical segments are tracked
+by path. Directories use owner-only permissions (0700); segment files use 0600.
 
-## WAL Entry Format
+Before a record would exceed the segment-size threshold, the WAL closes the
+active segment and creates the next numbered segment. It syncs the directory
+when creating a new segment. Records are never split across segment files. The
+rotation threshold is separate from the maximum permitted record size.
 
-Each segment contains a sequence of entries encoded as follows:
+## V1 record format
 
-![WAL structure](./assets/wal_structure.png)
+All multi-byte integers use big-endian encoding. Each record has an 18-byte
+header followed by its encoded arguments.
 
-1. **CRC** — 4 bytes. A checksum of the version, LSN, operation type, length,
-   and data.
-2. **Version** — 1 byte. Identifies the encoding version of the WAL entry.
-3. **LSN** — 8 bytes. A monotonically increasing log sequence number.
-4. **Operation type** — 1 byte. Identifies the operation, such as `SET` or
-   `DELETE`.
-5. **Data length** — 4 bytes. The size of the data field.
-6. **Data** — Variable length. The operation's arguments.
+| Offset | Field | Bytes | Meaning |
+| --- | --- | --- | --- |
+| 0 | Checksum | 4 | CRC32 IEEE over bytes from version through the end of data |
+| 4 | Version | 1 | 1 |
+| 5 | LSN | 8 | Increasing mutation sequence number |
+| 13 | Operation | 1 | 1 for SET, 2 for DELETE |
+| 14 | Data length | 4 | Argument payload length in bytes |
+| 18 | Data | Variable | Encoded operation arguments |
 
-The fixed entry overhead is 18 bytes, so the total entry size is:
+The payload contains a uint64 argument count, followed by a uint64 length and
+bytes for each argument. SET has key/value arguments; DELETE has one key argument.
+Payload integers are also big-endian. Length framing permits arbitrary binary
+keys and values without delimiter escaping.
 
-```text
-18 + data length
-```
+The encoder reserves the checksum field, encodes the remaining record, computes
+the checksum, and fills the reserved field. The decoder bounds the declared data
+length before allocation and verifies the checksum before emitting a record.
 
-## WAL Startup
+See [record encoding](../db/wal/wal_entry.go) and
+[argument encoding](../utils/encoding.go) for the persisted representation.
 
-When a WAL is opened:
+## Open and replay
 
-1. The path is converted to an absolute path.
-2. The directory is created if needed with owner-only permissions (`0700`).
-3. An exclusive, non-blocking advisory lock is acquired on `wal.lock`.
-4. Existing segment files are discovered and sorted by ID. Directories and files with invalid names are ignored.
-5. The WAL remains in `recovery required` state. Writes are rejected until startup recovery succeeds.
-6. Startup recovery scans every discovered segment once, applies each entry through the caller's callback, and derives the latest LSN in the same pass.
-7. If the latest segment is below the configured size limit, it is reopened in append mode and reused. Otherwise, a new active segment is created with the next ID and the WAL directory is synchronized so the new directory entry is durable.
+1. Resolve the directory, create it if needed, and acquire its lock.
+2. Discover segment files and sort them by ID.
+3. Remain in recovery-required state. Writes are rejected.
+4. Replay records through the caller's callback, validating their encoding,
+   checksums, operation types, and increasing LSNs.
+5. After successful replay, establish the next LSN and open the active segment
+   for writes. Reuse the latest segment if it has room; otherwise create a new one.
 
-Segment files use owner-only read/write permissions (`0600`) and are opened in append mode. Historical segments are tracked by path but are not kept open; only the active segment is opened for writing.
+Replay may succeed once per open WAL. Replay on a ready or closed WAL is rejected.
+A callback error leaves WAL recovery-required; retry begins from the start and
+requires resetting the destination first. DurableWal returns zero on replay
+error even if earlier callbacks applied records. The Engine must check the error
+rather than treating that count as proof of an empty recovered view.
 
-An empty WAL starts with `wal_segment__1`. A new segment uses `max(existing segment ID) + 1`; a reusable latest segment retains its existing ID and byte-size accounting.
+## Torn tails and corruption
 
-## WAL Shutdown
+Only an incomplete final record in the latest segment is a recoverable torn tail.
+Replay truncates that segment to its last complete record and syncs the repair.
+An incomplete record in an older segment, invalid checksum, unsupported version,
+illegal operation, excessive declared length, or non-increasing LSN is an error.
 
-Closing the WAL synchronizes and closes the active segment, closes any other open segment handles, and releases the directory lock. The lock must be held for the entire lifetime of the WAL so that only one process can write to the directory at a time.
+The [server startup path](../commands/server.go) aborts on a recovery error before
+accepting connections. A partial Engine replay is not a successful database open.
 
-## Recovery and Segment Rotation
+## Close
 
-Recovery replays segments and entries present at startup in order and may succeed only once for an open WAL. The callback is responsible for rebuilding the store while replay simultaneously derives the latest LSN. Only after the complete scan and callback succeed does the WAL open an active segment and accept writes. A failed callback leaves the WAL in `recovery required` state so recovery can be retried from the beginning.
-
-Engine's in-place replay policy does not change this WAL lifecycle. A failed
-callback can leave Engine prefix records even though DurableWal returns a zero
-count and does not enable writes. Replay on a ready WAL is rejected, and Close
-is terminal for that WAL instance. Engine.Recover does not reopen it; ordinary
-restart constructs a new WAL and Engine. Do not use the permissive test fixture
-as evidence that Recover-after-Close works with DurableWal.
-
-A torn final record in the latest recovered segment is truncated back to the last complete record. An incomplete record in an older segment, a complete record with an invalid CRC, an invalid operation, or non-increasing LSN order is treated as corruption.
-
-Before a record would make the active segment exceed its configured size limit, the WAL closes that segment, creates a new segment with the next ID, synchronizes the WAL directory, and appends the record there.
-
-
-## Interesting Decisions
-
-1. Why is CRC calculated at the end but written to the start of the record?
-
-We need to first convert all the data we want into bytes before we calculate its checksum. That's why we calculate it at the end.
-
-When we replay a WAL record, we need to know if an entry is valid before we parse or skip it. Hence, it is easy to read the first 4 bytes, look at the checksum, parse the remaining bytes, and compare the checksum.
-
-
-2. Why do we append data length to the record instead of using a de-limiter to identify separate records?
-
-What if the de-limiter was part of the data we're encoding? Since the data comes from various places, we cannot reliably find a delimiter that won't come up inside the data. Hence it's simple to just track the length of bytes and read till then to decode the original WalEntry.
+Close synchronizes and closes the active segment, releases remaining resources,
+and releases the directory lock. It is idempotent after successful cleanup. Close
+is terminal for that WAL instance; restart opens a new WAL over the same files.

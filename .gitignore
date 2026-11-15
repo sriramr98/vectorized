@@ -3,3 +3,6 @@ site/.astro/
 site/dist/
 site/node_modules/
 __debug*
+
+# Personal planning and agent notes
+/.project-notes/
